@@ -4,12 +4,9 @@ import qs.Ui
 
 // Bar host. Mirrors the first-party split: this widget owns the bar slot and
 // pill button; Panel.qml owns data, lifecycle, and the popup.
-//
-// TEMPLATE: change moduleName to your plugin id. Everything else in this file
-// is the shape contract the shell expects and should not need edits.
 BarWidget {
   id: root
-  moduleName: "io.github.YOURNAME.widget-name"
+  moduleName: "io.github.jeremylongshore.x-files"
 
   function injectPanel() {
     var target = panelLoader.item
@@ -46,7 +43,9 @@ BarWidget {
     if (panelLoader.item) panelLoader.item.closeForPopoutSwitch()
   }
 
-  // Collapse the slot entirely when the panel has nothing to say.
+  // The whole point: the slot collapses when there is nothing new. A radar
+  // that pings all day is a feed; this one only speaks when something
+  // shipped or something is down.
   visible: panelLoader.item && panelLoader.item.label !== ""
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: button.implicitHeight
@@ -71,8 +70,8 @@ BarWidget {
     bar: root.bar
     text: panelLoader.item ? panelLoader.item.label : ""
     fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
-    // The alert state lights the pill in the bar's active color so a glance
-    // reads it without parsing the text.
+    // A queue that needs you or a spend cap hit lights the pill in the bar's active
+    // color so a glance reads it without parsing the text.
     active: panelLoader.item ? panelLoader.item.isAlert === true : false
     tooltipText: panelLoader.item ? panelLoader.item.tooltip : ""
 

@@ -1,0 +1,88 @@
+#!/usr/bin/env node
+// X Files login CLI. The ONLY code that ever writes the credentials
+// file. The plugin proper (QML and the poller both) treats credentials as
+// read-only; the widget's settings surface shows the token's last four
+// characters and nothing more.
+//
+//   x-files-login --token <bearer-token> --username <your-x-handle>
+//   x-files-login --forget
+//
+// The token is an X API app-only bearer token from the developer console at
+// https://console.x.com (pay-per-use credits). This command resolves
+// your numeric user id with one users/by/username lookup, then writes
+// ~/.local/state/omarchy/x-files/credentials.json with mode 0600.
+// The token never prints, never lands in state.json, and never appears in
+// a process argv after this command exits (the poller passes it via an
+// env variable to curl's --header @- stdin, not argv).
+"use strict"
+
+var fs = require("fs")
+var path = require("path")
+var os = require("os")
+var childProcess = require("child_process")
+
+var Model = require(path.join(__dirname, "..", "Model.js"))
+
+var STATE_DIR = path.join(
+  process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
+  "omarchy", "x-files")
+var CREDS_FILE = path.join(STATE_DIR, "credentials.json")
+
+function die(msg) {
+  process.stderr.write("x-files-login: " + msg + "\n")
+  process.exit(1)
+}
+
+function main() {
+  var args = process.argv.slice(2)
+  if (args.indexOf("--forget") >= 0) {
+    try { fs.unlinkSync(CREDS_FILE) } catch (e) { /* already gone */ }
+    process.stderr.write("x-files-login: credentials removed\n")
+    return
+  }
+  var tIdx = args.indexOf("--token")
+  var uIdx = args.indexOf("--username")
+  var token = tIdx >= 0 ? String(args[tIdx + 1] || "") : ""
+  var username = uIdx >= 0 ? String(args[uIdx + 1] || "") : ""
+  if (!token || !username) {
+    die("usage: x-files-login --token <bearer-token> --username <handle>")
+  }
+  username = username.replace(/^@/, "")
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) die("that does not look like an X handle")
+  if (!/^[A-Za-z0-9%_-]{20,}$/.test(token)) die("that does not look like a bearer token")
+
+  // One lookup proves the token works and resolves the numeric id. The
+  // Authorization header rides curl's stdin (--header @-), never argv, so
+  // the token is invisible to ps for the lifetime of the request.
+  var res = childProcess.spawnSync("curl", [
+    "-fsS", "--proto", "=https", "--max-time", "20",
+    "--max-filesize", String(Model.MAX_BODY_CHARS),
+    "--header", "@-",
+    "--", Model.userByUsernameUrl(username)
+  ], {
+    input: "Authorization: Bearer " + token + "\n",
+    encoding: "utf8",
+    maxBuffer: Model.MAX_BODY_CHARS + 65536,
+    timeout: 25000
+  })
+  if (res.status !== 0) {
+    die("lookup failed (" + String(res.stderr || "").trim().slice(0, 120)
+      + "). Check the token and that your credits are active.")
+  }
+  var user = Model.parseUserLookup(res.stdout)
+  if (!user) die("could not parse the user lookup response")
+
+  fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
+  var tmp = CREDS_FILE + ".tmp." + process.pid
+  fs.writeFileSync(tmp, JSON.stringify({
+    bearerToken: token,
+    userId: user.id,
+    username: user.username
+  }), { mode: 0o600 })
+  fs.renameSync(tmp, CREDS_FILE)
+
+  process.stderr.write("x-files-login: connected @" + user.username
+    + " (token ending " + token.slice(-4) + "). Run x-files-poll to start.\n")
+}
+
+main()

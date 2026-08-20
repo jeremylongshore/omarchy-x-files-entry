@@ -1,24 +1,64 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.YOURNAME.widget-name",
-  "name": "Widget Name",
-  "version": "0.1.0",
-  "author": "Your Name",
+  "id": "io.github.jeremylongshore.x-files",
+  "name": "X Files",
+  "version": "1.0.0",
+  "author": "Jeremy Longshore",
   "license": "MIT",
-  "description": "One-sentence description of what the widget shows in the Omarchy bar.",
+  "description": "Reads the replies to your own X posts and tells you what they said: classified digests, representative quotes, and a drainable needs-your-reply queue, for a few dollars a month of API credits with an always-visible spend meter.",
   "kinds": [
+    "service",
     "bar-widget"
   ],
   "entryPoints": {
+    "service": "Service.qml",
     "barWidget": "BarWidget.qml"
   },
   "barWidget": {
-    "displayName": "Widget Name",
-    "description": "Longer description: what the pill shows, what the panel carries, where the data comes from.",
-    "category": "Info",
+    "displayName": "X Files",
+    "description": "The pill counts replies that need you and turns loud at the monthly spend cap. The panel is a drainable queue plus per-post digests: volume, velocity, bucket chips, and verbatim quotes. Connect with x-files-login; the widget never sees your token.",
+    "category": "Productivity",
     "aliases": [
-      "widget-name"
+      "x-files",
+      "x-replies",
+      "reply-triage",
+      "mentions"
     ],
-    "allowMultiple": false
+    "allowMultiple": false,
+    "defaults": {
+      "notifications": "On",
+      "monthlyCapUsd": 8,
+      "costPerPost": 0.005,
+      "aiBaseUrl": "",
+      "aiModel": "",
+      "aiApiKey": ""
+    },
+    "schema": [
+      {
+        "key": "notifications",
+        "type": "enum",
+        "label": "Desktop notifications",
+        "options": ["On", "Off"],
+        "defaultValue": "On",
+        "description": "Notify only when a new reply enters the needs-your-reply queue."
+      },
+      {
+        "key": "monthlyCapUsd",
+        "type": "integer",
+        "label": "Monthly spend cap (US dollars)",
+        "min": 1,
+        "max": 100,
+        "step": 1,
+        "defaultValue": 8,
+        "description": "A hard stop, not a warning. At the cap the poller stops fetching until the month rolls over."
+      },
+      {
+        "key": "costPerPost",
+        "type": "string",
+        "label": "Cost per post read (US dollars)",
+        "defaultValue": "0.005",
+        "description": "The X API post-read rate. Adjust down if your account bills owned reads cheaper; the spend meter uses this to charge every returned post."
+      }
+    ]
   }
 }

@@ -5,41 +5,317 @@ const path = require("node:path")
 
 const Model = require("../Model.js")
 
-// TEMPLATE: capture real API responses into tests/fixtures/ and load them
-// here. Tests run against captured bodies, never the network.
+// Fixtures are synthesized X API v2 envelopes (real v2 shapes; live capture
+// waits on API credits, see docs/FIXTURES.md). They exercise the parse,
+// classify, dedupe, score, digest, and spend paths offline. The conversation
+// fixture is a realistic reply mix: two independent bug reports (one a
+// near-duplicate), a feature ask, a question, praise, a "+1", and spam.
 const fixture = (name) =>
   fs.readFileSync(path.join(__dirname, "fixtures", name), "utf8")
 
-test("clean strips angle brackets so AutoText can never promote to StyledText", () => {
-  assert.equal(Model.clean('<img src="http://x/y.png">Bo'), 'img src="http://x/y.png"Bo')
+const SELF = "44196397"
+const NOW_MS = Date.parse("2026-08-20T16:00:00Z")
+
+// ---- clean ----
+
+test("clean strips angle brackets, controls, bidi, and tag chars", () => {
+  assert.equal(Model.clean('<img src=x>hi'), "img src=xhi")
+  assert.equal(Model.clean("a\x00b\x7fc"), "abc")
+  assert.equal(Model.clean("a‮b⁦c", 10), "abc")
+  assert.equal(Model.clean("x".repeat(80), 32).length, 32)
 })
 
-test("clean strips control characters", () => {
-  assert.equal(Model.clean("a\x00b\x1fc\x7fd"), "abcd")
+// ---- URL safety ----
+
+test("threadUrl builds only from a clean handle and numeric id", () => {
+  assert.equal(Model.threadUrl("testfounder", "123"), "https://x.com/testfounder/status/123")
+  // Every non-handle character is stripped, so a metacharacter-laden value
+  // can never reach the URL (and thus never reach xdg-open's argv).
+  assert.equal(Model.threadUrl("bad; rm -rf", "123"), "https://x.com/badrmrf/status/123")
+  assert.equal(Model.threadUrl("", "123"), "")
+  assert.equal(Model.threadUrl("user", "12a3"), "https://x.com/user/status/123")
 })
 
-test("clean caps pathological length", () => {
-  assert.equal(Model.clean("x".repeat(500), 64).length, 64)
+// ---- URL builders keep since_id discipline ----
+
+test("URL builders carry since_id when given and omit it when not", () => {
+  assert.ok(Model.userTweetsUrl("44196397", "").indexOf("since_id") === -1)
+  assert.ok(Model.userTweetsUrl("44196397", "999").indexOf("since_id=999") > 0)
+  assert.ok(Model.mentionsUrl("44196397", "999").indexOf("since_id=999") > 0)
+  assert.ok(Model.conversationSearchUrl("1900000000000000001", "").indexOf("conversation_id") > 0)
+  assert.ok(Model.userTweetsUrl("44196397").indexOf("max_results=25") > 0)
 })
 
-test("clean tolerates null and undefined", () => {
-  assert.equal(Model.clean(null), "")
-  assert.equal(Model.clean(undefined), "")
+// ---- rate headers ----
+
+test("parseRateHeaders reads the three x-rate-limit fields", () => {
+  const r = Model.parseRateHeaders("HTTP/2 200\r\nx-rate-limit-limit: 450\r\nx-rate-limit-remaining: 12\r\nx-rate-limit-reset: 1787000000\r\n")
+  assert.equal(r.limit, 450)
+  assert.equal(r.remaining, 12)
+  assert.equal(r.resetAt, 1787000000)
 })
 
-test("parseExample returns [] on malformed input, keeping last-good state", () => {
-  assert.deepEqual(Model.parseExample("not json"), [])
-  assert.deepEqual(Model.parseExample(""), [])
-  assert.deepEqual(Model.parseExample(null), [])
+test("backoffMs prefers the reset time, else exponential capped at 30s", () => {
+  assert.equal(Model.backoffMs(0, 0, NOW_MS), 1000)
+  assert.equal(Model.backoffMs(10, 0, NOW_MS), 30000)
+  const withReset = Model.backoffMs(0, Math.floor(NOW_MS / 1000) + 60, NOW_MS)
+  assert.ok(withReset >= 60000 && withReset <= 62000)
 })
 
-test("parseExample maps rows through clean", () => {
-  const rows = Model.parseExample(JSON.stringify([{ name: "<b>alpha</b>", value: "1" }]))
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].name, "balpha/b")
+// ---- response parsing ----
+
+test("parseUserLookup extracts id, username, name", () => {
+  const u = Model.parseUserLookup(fixture("user-lookup.json"))
+  assert.equal(u.id, "44196397")
+  assert.equal(u.username, "testfounder")
 })
 
-test("pillText is empty when there is nothing to say", () => {
-  assert.equal(Model.pillText([]), "")
-  assert.equal(Model.pillText(null), "")
+test("parseUserLookup rejects malformed bodies", () => {
+  assert.equal(Model.parseUserLookup("{}"), null)
+  assert.equal(Model.parseUserLookup("not json"), null)
+})
+
+test("parseTweetList joins author usernames from includes and counts results", () => {
+  const parsed = Model.parseTweetList(fixture("conversation.json"))
+  assert.equal(parsed.valid, true)
+  assert.equal(parsed.resultCount, 7)
+  assert.equal(parsed.tweets.length, 7)
+  assert.equal(parsed.newestId, "1900000000000000107")
+  const first = parsed.tweets[0]
+  assert.equal(first.authorUsername, "wayland_user")
+  assert.ok(first.metrics.likes >= 0)
+})
+
+test("parseTweetList returns the zero shape on malformed or oversized input", () => {
+  assert.equal(Model.parseTweetList("nope").valid, false)
+  assert.equal(Model.parseTweetList("x".repeat(Model.MAX_BODY_CHARS + 1)).valid, false)
+})
+
+// ---- classification ----
+
+test("classifyReply buckets the reply mix correctly", () => {
+  assert.equal(Model.classifyReply("This is broken for me, the panel crashes on open."), "gripe")
+  assert.equal(Model.classifyReply("Could you add per-provider toggles?"), "feature_ask")
+  assert.equal(Model.classifyReply("How does the spend meter know the price?"), "question")
+  assert.equal(Model.classifyReply("love this, absolute gold"), "praise")
+  assert.equal(Model.classifyReply("follow me for crypto signals, DM for the airdrop"), "noise")
+  assert.equal(Model.classifyReply("same here"), "noise")
+})
+
+test("classifyReply reads sarcasm as a gripe, not praise", () => {
+  assert.equal(Model.classifyReply("love how it crashes every single time /s"), "gripe")
+})
+
+test("a bug complaint that also says 'love' still classifies as a gripe", () => {
+  assert.equal(Model.classifyReply("love the idea but it is completely broken and crashes"), "gripe")
+})
+
+// ---- substance ----
+
+test("substanceScore floors '+1' chains and rewards specific reports", () => {
+  assert.ok(Model.substanceScore("same here", {}) <= 0.1)
+  assert.ok(Model.substanceScore("+1", {}) <= 0.1)
+  assert.ok(Model.substanceScore(
+    "The panel crashes on open on Wayland, version 1.0, every time I press super+r.",
+    { likes: 6 }) > 0.5)
+})
+
+// ---- dedupe ----
+
+test("collapseDuplicates groups the two near-identical Wayland-crash reports", () => {
+  const parsed = Model.parseTweetList(fixture("conversation.json"))
+  const replies = parsed.tweets
+    .filter((t) => t.authorId !== SELF)
+    .map((t) => ({ id: t.id, text: t.text, authorUsername: t.authorUsername,
+      metrics: t.metrics, bucket: Model.classifyReply(t.text) }))
+  Model.collapseDuplicates(replies, 0.55)
+  const crashers = replies.filter((r) => /crash/i.test(r.text))
+  assert.equal(crashers.length, 2)
+  const canon = crashers.filter((r) => r.isCanonical)
+  assert.equal(canon.length, 1, "one of the two crash reports is canonical")
+  assert.ok(canon[0].dupCount >= 1)
+})
+
+test("hybridSimilarity is high for paraphrases and low for unrelated text", () => {
+  assert.ok(Model.hybridSimilarity("the panel crashes on open", "panel crashes when I open it") > 0.4)
+  assert.ok(Model.hybridSimilarity("the panel crashes", "please add dark mode") < 0.2)
+})
+
+// ---- redaction ----
+
+test("redactPii strips emails, tokens, keys, and phones before any prompt", () => {
+  const r = Model.redactPii("mail me at a@b.com or use sk-ABCDEFGHIJKLMNOPQRSTUVWX call 415-555-1212")
+  assert.ok(r.redactedText.indexOf("a@b.com") === -1)
+  assert.ok(r.redactedText.indexOf("sk-ABCDEFGHIJKLMNOPQRSTUVWX") === -1)
+  assert.ok(r.redactedText.indexOf("415-555-1212") === -1)
+  assert.ok(r.piiFlags.indexOf("email") >= 0)
+})
+
+// ---- digest ----
+
+function ingestFixture() {
+  const parsed = Model.parseTweetList(fixture("conversation.json"))
+  const replies = parsed.tweets
+    .filter((t) => t.authorId !== SELF)
+    .map((t) => ({ id: t.id, text: t.text, authorId: t.authorId,
+      authorUsername: t.authorUsername, conversationId: t.conversationId,
+      createdMs: t.createdMs, metrics: t.metrics,
+      bucket: Model.classifyReply(t.text),
+      substance: Model.substanceScore(t.text, t.metrics) }))
+  Model.collapseDuplicates(replies, 0.55)
+  return replies
+}
+
+test("bucketCounts and bucketChips summarize the reply mix", () => {
+  const replies = ingestFixture()
+  const counts = Model.bucketCounts(replies)
+  assert.ok(counts.gripe >= 2)
+  assert.ok(counts.feature_ask >= 1)
+  assert.ok(counts.question >= 1)
+  assert.ok(counts.praise >= 1)
+  assert.ok(counts.noise >= 2)
+  assert.ok(Model.bucketChips(counts).indexOf("gripe") >= 0)
+})
+
+test("topQuotes returns verbatim canonical quotes, never a numeric score", () => {
+  const replies = ingestFixture()
+  const quotes = Model.topQuotes(replies)
+  assert.ok(quotes.length >= 1 && quotes.length <= 2)
+  for (const q of quotes) {
+    assert.ok(q.text.length > 0)
+    assert.ok(q.bucket !== "noise")
+    assert.equal(typeof q.username, "string")
+  }
+})
+
+// ---- needs-reply gate ----
+
+test("needsReply passes substantive questions/gripes/asks from others only", () => {
+  const replies = ingestFixture()
+  const queue = replies.filter((r) => Model.needsReply(r, SELF))
+  const buckets = queue.map((r) => r.bucket)
+  assert.ok(buckets.indexOf("gripe") >= 0)
+  assert.ok(buckets.indexOf("feature_ask") >= 0 || buckets.indexOf("question") >= 0)
+  assert.ok(queue.every((r) => r.bucket !== "praise" && r.bucket !== "noise"))
+  // The "+1" and spam never reach the queue.
+  assert.ok(!queue.some((r) => /same here/i.test(r.text)))
+  assert.ok(!queue.some((r) => /crypto signals/i.test(r.text)))
+  // Only one of the two duplicate crash reports (the canonical) is queued.
+  assert.equal(queue.filter((r) => /crash/i.test(r.text)).length, 1)
+})
+
+test("needsReply excludes the author's own replies", () => {
+  const self = { authorId: SELF, bucket: "question", substance: 0.9, isCanonical: true }
+  assert.equal(Model.needsReply(self, SELF), false)
+})
+
+// ---- spend meter ----
+
+test("chargeLedger accumulates within a month and resets across months", () => {
+  let l = Model.chargeLedger(null, 100, 0.005, NOW_MS)
+  assert.equal(l.posts, 100)
+  assert.equal(l.dollars, 0.5)
+  l = Model.chargeLedger(l, 50, 0.005, NOW_MS)
+  assert.equal(l.posts, 150)
+  assert.equal(l.dollars, 0.75)
+  const nextMonth = Date.parse("2026-09-01T00:00:00Z")
+  l = Model.chargeLedger(l, 10, 0.005, nextMonth)
+  assert.equal(l.posts, 10, "ledger resets on a new month")
+})
+
+test("projectedMonthUsd extrapolates linearly on the month so far", () => {
+  const midMonth = Date.parse("2026-08-10T00:00:00Z") // day 10 of 31
+  const l = { month: "2026-08", posts: 200, dollars: 1.0 }
+  const proj = Model.projectedMonthUsd(l, midMonth)
+  assert.ok(proj > 3.0 && proj < 3.2, "1.00 by day 10 projects ~3.10 for August")
+})
+
+test("budgetStopped is a hard stop at the cap", () => {
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 8.01 }, 8, NOW_MS), true)
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 5 }, 8, NOW_MS), false)
+  assert.equal(Model.budgetStopped({ month: "2026-07", dollars: 99 }, 8, NOW_MS), false)
+})
+
+test("spendText and usd format money cleanly", () => {
+  assert.equal(Model.usd(1.5), "$1.50")
+  assert.equal(Model.usd(0), "$0.00")
+  const t = Model.spendText({ month: "2026-08", posts: 0, dollars: 1.83 }, NOW_MS)
+  assert.ok(t.indexOf("$1.83 this month") === 0)
+  assert.ok(t.indexOf("projected") > 0)
+})
+
+// ---- pill ----
+
+test("pillText reflects setup, paused, count, and drained states", () => {
+  assert.equal(Model.pillText({ valid: true, configured: false }), "X Files: setup")
+  assert.equal(Model.pillText({ valid: true, configured: true, stopped: true, queue: [] }), "Replies: paused")
+  assert.equal(Model.pillText({ valid: true, configured: true, stopped: false,
+    queue: [{ done: false }, { done: false }, { done: true }] }), "Replies: 2")
+  assert.equal(Model.pillText({ valid: true, configured: true, stopped: false,
+    queue: [{ done: true }] }), "")
+})
+
+// ---- summary (BYOK) ----
+
+test("summaryRequestBody bans hype and pins facts; parseSummary extracts content", () => {
+  const body = JSON.parse(Model.summaryRequestBody("m", "Post: x\nReplies: 3"))
+  assert.equal(body.max_tokens, 700)
+  assert.ok(body.messages[0].content.indexOf("no em dashes") >= 0)
+  assert.equal(Model.parseSummary(fixture("chat-completion.json")).length > 0, true)
+  assert.equal(Model.parseSummary("{}"), "")
+})
+
+test("summaryContext redacts PII out of quotes before the prompt", () => {
+  const ctx = Model.summaryContext({
+    postText: "p", totalReplies: 1, buckets: Model.bucketCounts([]),
+    quotes: [{ text: "email me at leak@evil.com", username: "u", bucket: "question" }]
+  })
+  assert.ok(ctx.indexOf("leak@evil.com") === -1)
+})
+
+// ---- state record ----
+
+test("parseState round-trips the poller's record and sanitizes on read", () => {
+  const state = {
+    generatedAt: NOW_MS, configured: true, stopped: false, capUsd: 8,
+    account: { username: "testfounder", last4: "AB12" },
+    ledger: { month: "2026-08", posts: 100, dollars: 0.5 },
+    queue: [{ id: "1", text: "q", authorUsername: "u", bucket: "gripe",
+      substance: 0.6, dupCount: 1, createdMs: NOW_MS,
+      url: "https://x.com/u/status/1", done: false }],
+    posts: [{ postId: "9", postText: "p", totalReplies: 3, newReplies: 1,
+      velocity: 0.5, buckets: { gripe: 1 },
+      quotes: [{ text: "t", username: "u", bucket: "gripe" }], summary: "s" }]
+  }
+  const parsed = Model.parseState(JSON.stringify(state))
+  assert.equal(parsed.valid, true)
+  assert.equal(parsed.configured, true)
+  assert.equal(parsed.account.last4, "AB12")
+  assert.equal(parsed.queue.length, 1)
+  assert.equal(parsed.posts.length, 1)
+  assert.equal(parsed.posts[0].quotes.length, 1)
+})
+
+test("parseState rejects a bad url and an unknown bucket", () => {
+  const state = {
+    configured: true,
+    queue: [{ id: "1", text: "q", bucket: "evil", url: "javascript:alert(1)", done: false }],
+    posts: []
+  }
+  const parsed = Model.parseState(JSON.stringify(state))
+  assert.equal(parsed.queue[0].url, "")
+  assert.equal(parsed.queue[0].bucket, "question")
+})
+
+test("parseState returns the zero object on malformed input", () => {
+  assert.equal(Model.parseState("").valid, false)
+  assert.equal(Model.parseState("{oops").valid, false)
+})
+
+// ---- manifest hygiene ----
+
+test("BUCKETS and defaults are self-consistent", () => {
+  assert.deepEqual(Model.BUCKETS, ["praise", "gripe", "question", "feature_ask", "noise"])
+  assert.equal(Model.DEFAULT_COST_PER_POST, 0.005)
+  assert.ok(Model.SUBSTANCE_FLOOR > 0 && Model.SUBSTANCE_FLOOR < 1)
 })

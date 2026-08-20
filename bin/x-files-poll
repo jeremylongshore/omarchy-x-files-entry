@@ -1,0 +1,524 @@
+#!/usr/bin/env node
+// X Files poller CLI. The only network surface and the only writer of
+// the plugin's state: reads the credentials the login command stored, polls
+// the X API v2 with since_id discipline, charges every returned post to the
+// monthly spend ledger, classifies and scores every reply through Model.js,
+// maintains the needs-reply queue and the per-post digests, and writes
+// state atomically (tmp+mv). The QML side only renders state.json and calls
+// back into this CLI for mark-done.
+//
+//   x-files-poll                  poll, write state, notify new queue items
+//   x-files-poll --no-notify      poll without notifications
+//   x-files-poll --mark-done ID…  mark queue items handled
+//   x-files-poll --mark-all-done  drain the queue
+//   x-files-poll --status         one-line summary
+//
+// Network hosts contacted: api.x.com (GET only), plus the user's own BYOK
+// completion endpoint (POST, only if all three ai settings are set).
+// The bearer token rides curl's stdin (--header @-), never argv, so it is
+// invisible to ps; it lives only in credentials.json (0600) and never
+// appears in state.json or any log.
+"use strict"
+
+var fs = require("fs")
+var path = require("path")
+var os = require("os")
+var childProcess = require("child_process")
+
+var Model = require(path.join(__dirname, "..", "Model.js"))
+
+var PLUGIN_ID = "io.github.jeremylongshore.x-files"
+var STATE_DIR = path.join(
+  process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
+  "omarchy", "x-files")
+var CREDS_FILE = path.join(STATE_DIR, "credentials.json")
+var STATE_FILE = path.join(STATE_DIR, "state.json")
+var INTERNAL_FILE = path.join(STATE_DIR, "internal.json")
+var SHELL_CONFIG = path.join(
+  process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"),
+  "omarchy", "shell.json")
+
+var NOTIFY_CAP = 3
+var SUMMARY_CAP_PER_POLL = 3
+var FANOUT_CAP_PER_POLL = 5
+
+function readJson(file, fallback) {
+  try { return JSON.parse(fs.readFileSync(file, "utf8")) } catch (e) { return fallback }
+}
+
+function safeRead(file) {
+  try { return fs.readFileSync(file, "utf8") } catch (e) { return "" }
+}
+
+// The tmp file is opened "wx" (O_CREAT|O_EXCL) so a pre-planted symlink at
+// the predictable path is refused rather than followed; mode 0600 keeps the
+// reply history (and, in credentials.json's dir, the token) unreadable to
+// other users.
+function writeAtomic(file, text) {
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 })
+  var tmp = file + ".tmp." + process.pid
+  try {
+    fs.writeFileSync(tmp, text, { mode: 0o600, flag: "wx" })
+    fs.renameSync(tmp, file)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch (e2) { /* nothing to clean */ }
+    throw e
+  }
+}
+
+// The plugin's settings live inline on its bar-layout entry in shell.json.
+function readSettings() {
+  var defaults = {
+    notifications: "On",
+    monthlyCapUsd: Model.DEFAULT_MONTHLY_CAP_USD,
+    costPerPost: Model.DEFAULT_COST_PER_POST,
+    aiBaseUrl: "", aiModel: "", aiApiKey: ""
+  }
+  var conf = readJson(SHELL_CONFIG, null)
+  if (!conf || !conf.bar || !conf.bar.layout) return defaults
+  var zones = ["left", "center", "right"]
+  for (var z = 0; z < zones.length; z++) {
+    var list = conf.bar.layout[zones[z]] || []
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i]
+      if (!e || e.id !== PLUGIN_ID) continue
+      return {
+        notifications: e.notifications === "Off" ? "Off" : "On",
+        monthlyCapUsd: Number(e.monthlyCapUsd) > 0 ? Number(e.monthlyCapUsd) : defaults.monthlyCapUsd,
+        costPerPost: Number(e.costPerPost) > 0 ? Number(e.costPerPost) : defaults.costPerPost,
+        aiBaseUrl: typeof e.aiBaseUrl === "string" ? e.aiBaseUrl : "",
+        aiModel: typeof e.aiModel === "string" ? e.aiModel : "",
+        aiApiKey: typeof e.aiApiKey === "string" ? e.aiApiKey : ""
+      }
+    }
+  }
+  return defaults
+}
+
+// GET against api.x.com. Returns { code, body }. The Authorization header
+// arrives via stdin so the token never enters an argv.
+function apiGet(url, token) {
+  var res = childProcess.spawnSync("curl", [
+    "-sS", "--proto", "=https", "--max-time", "20",
+    "--max-filesize", String(Model.MAX_BODY_CHARS),
+    "-o", "-", "-w", "\n%{http_code}",
+    "--header", "@-",
+    "--", url
+  ], {
+    input: "Authorization: Bearer " + token + "\n",
+    encoding: "utf8",
+    maxBuffer: Model.MAX_BODY_CHARS + 65536,
+    timeout: 25000
+  })
+  if (res.status !== 0 || typeof res.stdout !== "string") return { code: 0, body: "" }
+  var nl = res.stdout.lastIndexOf("\n")
+  return {
+    code: parseInt(res.stdout.slice(nl + 1), 10) || 0,
+    body: res.stdout.slice(0, nl)
+  }
+}
+
+// Flags first, feed-derived positionals (headline, body) last behind "--",
+// with a defensive leading-dash strip, so a reply whose text starts with a
+// dash can never be parsed as a notify-send option.
+function sendNotification(flags, headline, body) {
+  var args = flags.concat(["--", stripLead(headline)])
+  if (body !== undefined) args.push(stripLead(body))
+  childProcess.spawnSync("omarchy-notification-send", args, { timeout: 10000 })
+}
+
+function stripLead(s) {
+  return String(s === undefined ? "" : s).replace(/^[-\s]+/, "")
+}
+
+function classifyIngest(tweets, selfUserId) {
+  var out = []
+  for (var i = 0; i < tweets.length; i++) {
+    var t = tweets[i]
+    if (t.authorId === String(selfUserId)) continue
+    out.push({
+      id: t.id,
+      text: t.text,
+      authorId: t.authorId,
+      authorUsername: t.authorUsername,
+      conversationId: t.conversationId,
+      createdMs: t.createdMs,
+      metrics: t.metrics,
+      bucket: Model.classifyReply(t.text),
+      substance: Model.substanceScore(t.text, t.metrics)
+    })
+  }
+  return out
+}
+
+function maxId(a, b) {
+  // X ids are numeric strings too big for Number; compare by length then
+  // lexicographically.
+  var sa = String(a || "")
+  var sb = String(b || "")
+  if (!sa) return sb
+  if (!sb) return sa
+  if (sa.length !== sb.length) return sa.length > sb.length ? sa : sb
+  return sa > sb ? sa : sb
+}
+
+function poll(opts) {
+  var nowMs = Date.now()
+  var creds = readJson(CREDS_FILE, null)
+  var settings = readSettings()
+  var internal = readJson(INTERNAL_FILE, null) || {
+    firstRun: true, sinceTweets: "", sinceMentions: "", perConv: {},
+    ownPosts: [], replies: {}, mentionReplies: [], doneIds: {},
+    notifiedIds: {}, summaries: {}, ledger: { month: "", posts: 0, dollars: 0 }
+  }
+
+  function flush(extra) {
+    // Close the race with a concurrent mark-done: the panel may have written
+    // doneIds/notifiedIds to internal.json while this poll's fetch loop ran.
+    // Re-read the current on-disk flags and union them in (both are
+    // monotonic, so a union is always correct) before overwriting.
+    var current = readJson(INTERNAL_FILE, null)
+    if (current) {
+      var cd = current.doneIds || {}
+      for (var dk in cd) if (cd[dk]) internal.doneIds[dk] = true
+      var cn = current.notifiedIds || {}
+      for (var nk in cn) if (cn[nk]) internal.notifiedIds[nk] = true
+    }
+    var queue = buildQueue(internal, creds ? creds.userId : "")
+    var posts = buildDigests(internal, nowMs)
+    var state = {
+      generatedAt: nowMs,
+      configured: !!creds,
+      stopped: Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs),
+      capUsd: settings.monthlyCapUsd,
+      account: creds
+        ? { username: creds.username, last4: String(creds.bearerToken || "").slice(-4) }
+        : { username: "", last4: "" },
+      ledger: internal.ledger,
+      queue: queue,
+      posts: posts,
+      lastError: (extra && extra.lastError) || ""
+    }
+    writeAtomic(STATE_FILE, JSON.stringify(state))
+    writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
+    return state
+  }
+
+  if (!creds || !creds.bearerToken || !creds.userId) {
+    flush({})
+    process.stderr.write("x-files-poll: not configured, run x-files-login\n")
+    return
+  }
+
+  if (Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs)) {
+    flush({})
+    process.stderr.write("x-files-poll: monthly cap reached, not fetching\n")
+    return
+  }
+
+  var charged = 0
+  var errors = []
+
+  function charge(n) {
+    charged += n
+    internal.ledger = Model.chargeLedger(internal.ledger, n, settings.costPerPost, nowMs)
+  }
+
+  // 1. Own recent posts (the parents replies attach to).
+  var own = apiGet(Model.userTweetsUrl(creds.userId, internal.sinceTweets), creds.bearerToken)
+  if (own.code === 200) {
+    var ownParsed = Model.parseTweetList(own.body)
+    if (ownParsed.valid) {
+      charge(ownParsed.resultCount)
+      if (ownParsed.newestId) internal.sinceTweets = maxId(internal.sinceTweets, ownParsed.newestId)
+      for (var i = 0; i < ownParsed.tweets.length; i++) {
+        var p = ownParsed.tweets[i]
+        internal.ownPosts.unshift({
+          id: p.id, text: p.text, createdMs: p.createdMs,
+          conversationId: p.conversationId, metrics: p.metrics
+        })
+      }
+      // Keep the freshest tracked posts inside the age window.
+      var cutoff = nowMs - Model.TRACKED_POST_MAX_AGE_DAYS * 86400000
+      var seen = {}
+      var kept = []
+      internal.ownPosts.sort(function(a, b) { return b.createdMs - a.createdMs })
+      for (var j = 0; j < internal.ownPosts.length; j++) {
+        var op = internal.ownPosts[j]
+        if (seen[op.id] || op.createdMs < cutoff) continue
+        seen[op.id] = true
+        if (kept.length < Model.TRACKED_POSTS_MAX) kept.push(op)
+      }
+      internal.ownPosts = kept
+    }
+  } else if (own.code === 429) {
+    errors.push("rate limited on own posts")
+  } else if (own.code !== 0) {
+    errors.push("own posts HTTP " + own.code)
+  } else {
+    errors.push("own posts fetch failed")
+  }
+
+  // 2. Mentions: replies and quote-mentions from anywhere.
+  var men = apiGet(Model.mentionsUrl(creds.userId, internal.sinceMentions), creds.bearerToken)
+  if (men.code === 200) {
+    var menParsed = Model.parseTweetList(men.body)
+    if (menParsed.valid) {
+      charge(menParsed.resultCount)
+      if (menParsed.newestId) internal.sinceMentions = maxId(internal.sinceMentions, menParsed.newestId)
+      ingestReplies(internal, classifyIngest(menParsed.tweets, creds.userId))
+    }
+  } else if (men.code === 429) {
+    errors.push("rate limited on mentions")
+  } else if (men.code !== 0) {
+    errors.push("mentions HTTP " + men.code)
+  }
+
+  // 3. Reply-count-gated conversation fan-out: only conversations whose
+  //    reply_count says something arrived since we last looked, capped per
+  //    poll so a viral day cannot blow the budget in one cycle.
+  var fanned = 0
+  for (var k = 0; k < internal.ownPosts.length && fanned < FANOUT_CAP_PER_POLL; k++) {
+    var post = internal.ownPosts[k]
+    var known = (internal.replies[post.id] || []).length
+    if (post.metrics.replies <= known) continue
+    fanned++
+    var conv = apiGet(
+      Model.conversationSearchUrl(post.conversationId, internal.perConv[post.conversationId]),
+      creds.bearerToken)
+    if (conv.code === 200) {
+      var convParsed = Model.parseTweetList(conv.body)
+      if (convParsed.valid) {
+        charge(convParsed.resultCount)
+        if (convParsed.newestId) {
+          internal.perConv[post.conversationId] =
+            maxId(internal.perConv[post.conversationId], convParsed.newestId)
+        }
+        ingestReplies(internal, classifyIngest(convParsed.tweets, creds.userId))
+      }
+    } else if (conv.code === 429) {
+      errors.push("rate limited on conversation search")
+      break
+    }
+  }
+
+  // 4. Optional BYOK digests for posts whose conversation grew.
+  maybeSummarize(internal, settings, nowMs)
+
+  // 5. Notifications for queue items never notified before. Nothing on the
+  //    first run: history is not news.
+  var state = flush({ lastError: errors.join("; ").slice(0, 100) })
+  if (!internal.firstRun && settings.notifications === "On" && !opts.noNotify) {
+    notifyNew(internal, state)
+    writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
+  } else if (internal.firstRun) {
+    // Baseline: everything present at first poll is already notified.
+    for (var q = 0; q < state.queue.length; q++) internal.notifiedIds[state.queue[q].id] = true
+    internal.firstRun = false
+    writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
+  }
+
+  process.stderr.write("x-files-poll: charged " + charged + " post reads ("
+    + Model.spendText(internal.ledger, nowMs) + "), queue "
+    + state.queue.filter(function(x) { return !x.done }).length
+    + (errors.length ? ", errors: " + errors.join("; ") : "") + "\n")
+}
+
+// New replies land in the per-conversation store when the conversation is a
+// tracked own post, otherwise in the mentions pool. Duplicate ids are
+// dropped; per-post stores are capped.
+function ingestReplies(internal, replies) {
+  for (var i = 0; i < replies.length; i++) {
+    var r = replies[i]
+    var postId = null
+    for (var j = 0; j < internal.ownPosts.length; j++) {
+      if (internal.ownPosts[j].conversationId === r.conversationId) {
+        postId = internal.ownPosts[j].id
+        break
+      }
+    }
+    var pool = postId
+      ? (internal.replies[postId] = internal.replies[postId] || [])
+      : internal.mentionReplies
+    var exists = false
+    for (var e = 0; e < pool.length; e++) {
+      if (pool[e].id === r.id) { exists = true; break }
+    }
+    if (exists) continue
+    pool.push(r)
+    if (pool.length > Model.MAX_REPLIES_PER_POST) pool.shift()
+  }
+  // Duplicate collapse runs per pool after ingest.
+  for (var p in internal.replies) Model.collapseDuplicates(internal.replies[p])
+  Model.collapseDuplicates(internal.mentionReplies)
+}
+
+function allReplies(internal) {
+  var out = []
+  for (var p in internal.replies) out = out.concat(internal.replies[p])
+  return out.concat(internal.mentionReplies)
+}
+
+function buildQueue(internal, selfUserId) {
+  var all = allReplies(internal)
+  var queue = []
+  for (var i = 0; i < all.length; i++) {
+    var r = all[i]
+    if (!Model.needsReply(r, selfUserId)) continue
+    queue.push({
+      id: r.id,
+      text: r.text,
+      authorUsername: r.authorUsername,
+      bucket: r.bucket,
+      substance: r.substance,
+      dupCount: r.dupCount || 0,
+      createdMs: r.createdMs,
+      url: Model.threadUrl(r.authorUsername, r.id),
+      done: internal.doneIds[r.id] === true
+    })
+  }
+  queue.sort(function(a, b) { return b.createdMs - a.createdMs })
+  return queue.slice(0, Model.MAX_QUEUE)
+}
+
+function buildDigests(internal, nowMs) {
+  var out = []
+  for (var i = 0; i < internal.ownPosts.length; i++) {
+    var post = internal.ownPosts[i]
+    var replies = internal.replies[post.id] || []
+    if (replies.length === 0 && post.metrics.replies === 0) continue
+    var unread = 0
+    for (var u = 0; u < replies.length; u++) {
+      if (!internal.doneIds[replies[u].id] && !internal.notifiedIds[replies[u].id]) unread++
+    }
+    var key = Model.summaryCacheKey(post.id, replies.length)
+    out.push({
+      postId: post.id,
+      postText: Model.clean(post.text, 120),
+      url: "",
+      createdMs: post.createdMs,
+      totalReplies: Math.max(replies.length, post.metrics.replies),
+      newReplies: unread,
+      velocity: Model.velocityPerHour(replies, nowMs),
+      buckets: Model.bucketCounts(replies),
+      quotes: Model.topQuotes(replies),
+      summary: internal.summaries[key] || ""
+    })
+  }
+  return out
+}
+
+function maybeSummarize(internal, settings, nowMs) {
+  var aiUrlOk = /^https:\/\/\S+$/.test(settings.aiBaseUrl)
+  if (!aiUrlOk || !settings.aiModel || !settings.aiApiKey) return
+  var made = 0
+  var digests = buildDigests(internal, nowMs)
+  for (var i = 0; i < digests.length && made < SUMMARY_CAP_PER_POLL; i++) {
+    var d = digests[i]
+    if (d.totalReplies < 3) continue
+    var key = Model.summaryCacheKey(d.postId, (internal.replies[d.postId] || []).length)
+    if (internal.summaries[key]) continue
+    var body = Model.summaryRequestBody(settings.aiModel, Model.summaryContext(d))
+    var url = settings.aiBaseUrl.replace(/\/+$/, "") + "/chat/completions"
+    var res = childProcess.spawnSync("curl", [
+      "-fsS", "--proto", "=https", "--max-time", "30",
+      "--max-filesize", "1000000",
+      "-H", "Content-Type: application/json",
+      "--header", "@-",
+      "-d", body, "--", url
+    ], {
+      input: "Authorization: Bearer " + settings.aiApiKey + "\n",
+      encoding: "utf8", maxBuffer: 2000000, timeout: 35000
+    })
+    if (res.status !== 0) continue
+    var text = Model.parseSummary(res.stdout)
+    if (text) {
+      internal.summaries[key] = text
+      made++
+    }
+  }
+  // Cache hygiene: keep only keys for tracked posts.
+  var live = {}
+  for (var j = 0; j < internal.ownPosts.length; j++) {
+    var pid = internal.ownPosts[j].id
+    var k = Model.summaryCacheKey(pid, (internal.replies[pid] || []).length)
+    if (internal.summaries[k]) live[k] = internal.summaries[k]
+  }
+  internal.summaries = live
+}
+
+function notifyNew(internal, state) {
+  var fresh = []
+  for (var i = 0; i < state.queue.length; i++) {
+    var item = state.queue[i]
+    if (item.done || internal.notifiedIds[item.id]) continue
+    fresh.push(item)
+  }
+  if (fresh.length === 0) return
+  if (fresh.length > NOTIFY_CAP) {
+    sendNotification(["-u", "low", "--app-name", "X Files"],
+      "X Files", fresh.length + " replies need you")
+  } else {
+    for (var j = 0; j < fresh.length; j++) {
+      var it = fresh[j]
+      var flags = ["-u", "low", "--app-name", "X Files"]
+      // The click action is dispatched by the shell as `bash -lc "<value>"`.
+      // The URL is single-quoted, safe only because Model.threadUrl builds it
+      // from a [A-Za-z0-9_] handle and a numeric id (no quote, no metachar);
+      // the re-test refuses to build the action if that ever regresses.
+      if (it.url && /^https:\/\/x\.com\/[A-Za-z0-9_]+\/status\/[0-9]+$/.test(it.url)) {
+        flags.push("--exec", "xdg-open '" + it.url + "'")
+      }
+      sendNotification(flags,
+        "@" + it.authorUsername + " (" + it.bucket.replace("_", " ") + ")",
+        it.text.slice(0, 120))
+    }
+  }
+  for (var m = 0; m < fresh.length; m++) internal.notifiedIds[fresh[m].id] = true
+}
+
+function markDone(ids, all) {
+  var internal = readJson(INTERNAL_FILE, null)
+  if (!internal) return
+  var state = Model.parseState(safeRead(STATE_FILE))
+  if (all) {
+    for (var i = 0; i < state.queue.length; i++) internal.doneIds[state.queue[i].id] = true
+  } else {
+    for (var j = 0; j < ids.length; j++) {
+      internal.doneIds[String(ids[j]).replace(/[^0-9]/g, "")] = true
+    }
+  }
+  writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
+  // Rewrite state.json with the new done flags so the panel updates without
+  // a network poll.
+  var creds = readJson(CREDS_FILE, null)
+  var queue = buildQueue(internal, creds ? creds.userId : "")
+  var raw = readJson(STATE_FILE, null)
+  if (raw) {
+    raw.queue = queue
+    writeAtomic(STATE_FILE, JSON.stringify(raw))
+  }
+}
+
+function main() {
+  var args = process.argv.slice(2)
+  if (args.indexOf("--mark-all-done") >= 0) return markDone([], true)
+  var mdIdx = args.indexOf("--mark-done")
+  if (mdIdx >= 0) {
+    var ids = args.slice(mdIdx + 1).filter(function(a) { return a.slice(0, 2) !== "--" })
+    if (ids.length === 0) { process.stderr.write("usage: --mark-done <id>...\n"); process.exit(1) }
+    return markDone(ids, false)
+  }
+  if (args.indexOf("--status") >= 0) {
+    var st = Model.parseState(safeRead(STATE_FILE))
+    var open = 0
+    for (var i = 0; i < st.queue.length; i++) if (!st.queue[i].done) open++
+    process.stdout.write((st.valid ? (st.configured ? "connected @" + st.account.username : "not configured") : "no state")
+      + ", queue " + open + ", " + Model.spendText(st.ledger, Date.now())
+      + (st.stopped ? " [PAUSED at cap]" : "") + "\n")
+    return
+  }
+  poll({ noNotify: args.indexOf("--no-notify") >= 0 })
+}
+
+main()
