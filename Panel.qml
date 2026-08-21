@@ -291,6 +291,9 @@ Panel {
                 text: Model.spendText(root.ledger, root.nowMs)
                   + " · cap " + Model.usd(root.capUsd)
                 textFormat: Text.PlainText
+                width: parent.width
+                maximumLineCount: 1
+                elide: Text.ElideRight
                 color: root.bar ? root.bar.foreground : Color.foreground
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.bodySmall
@@ -371,6 +374,8 @@ Panel {
               anchors.leftMargin: Style.space(16)
               text: "Queue drained. Nothing is waiting on you."
               textFormat: Text.PlainText
+              width: parent.width - Style.space(32)
+              wrapMode: Text.WordWrap
               color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
@@ -423,6 +428,8 @@ Panel {
                     Text {
                       text: "@" + qItem.modelData.authorUsername
                       textFormat: Text.PlainText
+                      width: Math.min(implicitWidth, qCol.width * 0.4)
+                      elide: Text.ElideRight
                       color: root.bar ? root.bar.foreground : Color.foreground
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.bodySmall
@@ -432,6 +439,8 @@ Panel {
                       text: qItem.modelData.bucket.replace("_", " ")
                         + (qItem.modelData.dupCount > 0 ? " · +" + qItem.modelData.dupCount + " similar" : "")
                       textFormat: Text.PlainText
+                      width: Math.min(implicitWidth, qCol.width * 0.3)
+                      elide: Text.ElideRight
                       color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
@@ -439,6 +448,8 @@ Panel {
                     Text {
                       text: Model.ageText(qItem.modelData.createdMs, root.nowMs)
                       textFormat: Text.PlainText
+                      width: Math.min(implicitWidth, qCol.width * 0.3)
+                      elide: Text.ElideRight
                       color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
@@ -511,6 +522,9 @@ Panel {
                       + (modelData.velocity > 0 ? " · " + modelData.velocity + "/hr" : "")
                       + (Model.bucketChips(modelData.buckets) !== "" ? " · " + Model.bucketChips(modelData.buckets) : "")
                     textFormat: Text.PlainText
+                    width: parent.width
+                    maximumLineCount: 1
+                    elide: Text.ElideRight
                     color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.caption
@@ -561,6 +575,8 @@ Panel {
               anchors.leftMargin: Style.space(16)
               text: "j/k move · enter open · x done · c clear · r refresh"
               textFormat: Text.PlainText
+              width: parent.width - Style.space(32)
+              wrapMode: Text.WordWrap
               color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
@@ -571,6 +587,8 @@ Panel {
               anchors.leftMargin: Style.space(16)
               text: "Buckets and quotes, never a sentiment score. The spend meter is your bill, live."
               textFormat: Text.PlainText
+              width: parent.width - Style.space(32)
+              wrapMode: Text.WordWrap
               color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
