@@ -34,7 +34,7 @@ Panel {
   Connections {
     target: root.service
     ignoreUnknownSignals: true
-    function onStateChanged() { root.revision++ }
+    function onStoreChanged() { root.revision++ }
   }
 
   readonly property var queue: {
@@ -269,6 +269,12 @@ Panel {
                     + " · token ending " + root.accountLast4
                 }
                 textFormat: Text.PlainText
+                // One-line identity row. The handle comes from credentials.json
+                // and X caps handles at 15 characters, but "fits today" is not
+                // a bound, so cap it against the hero column and elide.
+                width: parent.width
+                maximumLineCount: 1
+                elide: Text.ElideRight
                 color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.muted
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption

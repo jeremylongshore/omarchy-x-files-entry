@@ -66,7 +66,7 @@ Item {
   readonly property bool stopped:
     Model.budgetStopped(internal.ledger, monthlyCapUsd, Date.now())
 
-  signal stateChanged()
+  signal storeChanged()
 
   // ------------------------------------------------------------- settings
 
@@ -383,7 +383,7 @@ Item {
       lastError: root.lastError
     }))
     internalFile.setText(JSON.stringify(root.internal))
-    root.stateChanged()
+    root.storeChanged()
   }
 
   function loadCredentials(raw) {
