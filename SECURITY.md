@@ -10,36 +10,43 @@ and a hostile reply must never fetch, execute, or mis-render inside the shell.
 ## Credential handling
 
 - **One writer.** `bin/x-files-login` is the only code that writes
-  `credentials.json`. The QML widget and the poller never write it; the
-  widget never reads it at all. Settings show only the token's last four
-  characters, sourced from `state.json`.
+  `credentials.json`. The QML service reads it and never writes it; the panel
+  never reads it at all. Only the token's last four characters reach
+  `state.json` and the rendered UI.
 - **The token never enters an argv, at any step.** The login command reads
   the token from **stdin** (`printf %s "$TOKEN" | x-files-login …`, or an
   interactive paste), never from `--token`, so it never lands in shell
   history or a world-readable `/proc/<pid>/cmdline`; passing `--token` is
-  refused with an explanation. Both CLIs then hand the `Authorization: Bearer`
-  header to curl over stdin (`--header @-`), so the token is invisible to
-  `ps` for the lifetime of every request. It appears only in
+  refused with an explanation. Both the login script and the QML service then
+  hand the `Authorization: Bearer` header to curl over stdin (`--header @-`),
+  so the token is invisible to `ps` for the lifetime of every request. In QML
+  that is a `Process` with `stdinEnabled`, the same mechanism the first-party
+  network panel uses to pass a wifi passphrase. It appears only in
   `credentials.json`, never in `state.json`, never in a log line, never in a
   notification.
-- **File modes.** `credentials.json` and its directory are mode 0600/0700;
-  the atomic writer in BOTH CLIs opens the tmp file `wx` (`O_CREAT|O_EXCL`)
-  and unlinks on failure, so a same-uid attacker cannot redirect the write
-  through a pre-planted symlink at the predictable path.
+- **File modes.** `credentials.json` is written to a `mktemp` file chmod-ed
+  0600 inside a 0700 directory and then renamed, so the token is never
+  world-readable even briefly. Plugin state is written through Quickshell's
+  `FileView` with `atomicWrites: true`, inheriting the shell's own write
+  discipline rather than reimplementing it.
 
 ## Architecture control
 
-The QML side never touches the network and never writes a file. All I/O lives
-in two auditable scripts:
+The plugin has no external runtime: no node, no python. The only shell script
+it ships is the one-time login; everything else runs inside Quickshell, using
+the `curl` and `jq` a stock Omarchy install already has. All I/O lives in one
+small bash script and one QML file:
 
 - **Fetch**: `curl -sS --proto =https --max-time 20 --max-filesize 2000000`
-  GET per endpoint. `--proto =https` pins the scheme, `--` closes option
-  parsing before the URL, and the URL is built by `Model` from a numeric user
+  GET per endpoint, issued from `Service.qml` through a QML `Process`.
+  `--proto =https` pins the scheme, `--` closes option parsing before the URL, and the URL is built by `Model` from a numeric user
   id and validated fields, never from reply content.
-- **State**: one JSON file, written atomically (tmp+mv) with a single writer;
-  the panel only reads it.
-- **Mark-done and refresh** from the panel are argv calls back into the
-  poller, never file writes from QML.
+- **State**: two JSON files under `~/.local/state/omarchy/x-files/`, written
+  through `FileView` with `atomicWrites: true` by the service, the single
+  owner of the store; the panel only reads them.
+- **Mark-done and refresh** are direct in-process calls into the service, the
+  single owner of the reply store, so there is no cross-process write race
+  that could lose a keystroke.
 
 ## Input containment
 
@@ -71,7 +78,7 @@ in two auditable scripts:
 ## Spend safety
 
 The monthly ledger is charged per returned post; at the configured cap the
-poller stops fetching entirely until the month rolls over (`budgetStopped`),
+service stops fetching entirely until the month rolls over (`budgetStopped`),
 and the panel shows a hard-stop banner. Two defenses make the cap robust
 against a mis-set price: `costPerPost` is clamped to a floor, and a second,
 price-independent read-count ceiling (derived from the dollar cap at that

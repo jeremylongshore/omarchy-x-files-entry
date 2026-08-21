@@ -8,6 +8,34 @@ BarWidget {
   id: root
   moduleName: "io.github.jeremylongshore.x-files"
 
+  // The service singleton this plugin's "service" kind loaded. The shell
+  // injects `service` into PANEL-kind plugins only; a bar widget receives just
+  // bar/moduleName/settings, so resolve it through the bar's shell handle.
+  // serviceFor() returns null until the shell finishes loading the singleton
+  // and is not a bound property, so poll briefly rather than latching null.
+  property var service: null
+
+  function resolveService() {
+    if (root.service) return
+    if (!root.bar || !root.bar.shell) return
+    if (typeof root.bar.shell.serviceFor !== "function") return
+    var svc = root.bar.shell.serviceFor(root.moduleName)
+    if (svc) {
+      root.service = svc
+      root.injectPanel()
+    }
+  }
+
+  Timer {
+    interval: 500
+    running: root.service === null
+    repeat: true
+    triggeredOnStart: true
+    onTriggered: root.resolveService()
+  }
+
+  onServiceChanged: injectPanel()
+
   function injectPanel() {
     var target = panelLoader.item
     if (!target) return
@@ -15,6 +43,7 @@ BarWidget {
     if ("settings" in target) target.settings = root.settings
     if ("anchorItem" in target) target.anchorItem = button
     if ("hostWidget" in target) target.hostWidget = root
+    if ("service" in target) target.service = root.service
   }
 
   function refresh() {
@@ -50,7 +79,7 @@ BarWidget {
   implicitWidth: visible ? button.implicitWidth : 0
   implicitHeight: button.implicitHeight
 
-  onBarChanged: injectPanel()
+  onBarChanged: { root.resolveService(); injectPanel() }
   onSettingsChanged: injectPanel()
 
   Loader {

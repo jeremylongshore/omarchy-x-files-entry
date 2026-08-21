@@ -4,7 +4,7 @@ What has actually been proven, how, and what remains.
 
 ## Unit suite (dev box + CI)
 
-**31 tests, all passing** (`npm test`), offline. The whole `Model.js` data
+**40 tests, all passing** (`npm test`), offline. The whole `Model.js` data
 layer: the X API v2 parsers (user lookup, tweet list with `includes.users`
 join and `meta.result_count`), the reply classifier (praise / gripe /
 question / feature_ask / noise, with sarcasm reading as gripe and a
@@ -43,6 +43,29 @@ reports collapse to one canonical with a "+1 similar" tag; praise, spam, and
 the "+1" never reach the queue), correct bucket chips, two verbatim quotes,
 and a charged spend ledger. Fixtures are synthesized because API credits were
 not yet purchased; the live-capture procedure is in `docs/FIXTURES.md`.
+
+## Node-free proof (the install-actually-works test)
+
+The plugin ships **no external runtime**: the only script is a small bash
+login helper; the poll cycle, spend ledger, and reply store all live in
+`Service.qml`. This matters because a stock Omarchy install has no node on the
+graphical session PATH (Omarchy installs node through mise, whose shims are
+not exported to the session), so a plugin with a node poller would silently
+never populate for a real user even though it works on a developer box.
+
+Proven on the Omarchy rig by installing the plugin and launching the shell
+with **`node` shadowed by a stub that exits 127**:
+
+- [x] the installed tree's only script is `bin/x-files-login` (bash)
+- [x] with node shadowed out of PATH, the QML service loaded credentials,
+      rebuilt the store, and wrote state: configured, a 3-item needs-reply
+      queue, 1 per-post digest, ledger intact
+- [x] the token never reaches `state.json` (grepped for it: absent; only the
+      last four characters are stored)
+- [x] the panel rendered the queue, the digest with bucket chips and verbatim
+      quotes, and the Compact spend bar
+- [x] no plugin-sourced errors in the shell log
+- [x] `omarchy-plugin-validate` exit 0, `qmllint` 0 errors
 
 ## Four-reviewer panel + claim audit (2026-08-21) and what they changed
 
@@ -84,21 +107,22 @@ fixed:
   security-sensitive claim (stdin-only token, no state.json leak, no X write
   endpoints, strict `--exec` quoting, unconditional caps) came back CONFIRMED.
 
-The suite grew from 31 to 37 tests covering these fixes; all pass offline.
+The suite grew from 31 to 40 tests covering these fixes; all pass offline.
 
 ## Four-reviewer panel lessons applied pre-emptively
 
-X Files shares the poller-CLI + QML-render architecture that the sibling
-Listening Post plugin took through a four-reviewer panel the same day. Every
+X Files shares its architecture with the sibling Listening Post plugin, which
+took a four-reviewer panel the same day (both have since moved that logic from
+a poller CLI into the QML service). Every
 BLOCK-class finding from that review was designed into X Files from the
 start rather than fixed after: the notification `--exec` URL is single-quoted
 and re-tested against a strict `x.com/…/status/…` pattern (Omarchy dispatches
 the click action as `bash -lc`); notification positionals go behind `--`;
-the atomic writer uses the `wx` flag against symlink attacks; the poll
-re-reads on-disk done flags before writing to avoid reverting a concurrent
-mark-done; the panel queues mark-done keystrokes that arrive during an
-in-flight write; and the panel wires only `activateRequested` (not both it
-and `returnRequested`) so Enter fires once. The bearer token additionally
+credential writes go to a 0600 temp file inside a 0700 directory before the
+rename; the service is the single owner of the store, so a mark-done can
+never be reverted by a concurrent poll and no keystroke needs queueing; and
+the panel wires only `activateRequested` (not both it and `returnRequested`)
+so Enter fires once. The bearer token additionally
 rides curl's stdin, never an argv.
 
 ## Proven on the Omarchy rig (2026-08-20)

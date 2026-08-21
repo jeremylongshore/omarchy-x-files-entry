@@ -152,23 +152,30 @@ and rejected: this is a reading tool, not a growth tool.
 ## Architecture
 
 ```
-bin/x-files-login   writes credentials.json (0600), the ONLY token writer
-bin/x-files-poll    the only network and the only state writer (node CLI)
+bin/x-files-login   a small bash script: writes credentials.json (0600),
+                    the ONLY token writer
+Service.qml         the whole poll cycle, in QML, with no external runtime
         |  curl --proto =https, Authorization via stdin (never argv),
         |  since_id on every fetch, spend charged per returned post
         v
-~/.local/state/omarchy/x-files/state.json   atomic tmp+mv, no token in it
+~/.local/state/omarchy/x-files/state.json   FileView atomic write, no token
         ^
-        |  read only
-Service.qml (timer)   BarWidget.qml + Panel.qml (render + keys)
+        |  read + mark-done, synchronously
+BarWidget.qml + Panel.qml (render + keys)
 ```
 
-The QML side never touches the network, never writes a file, and never sees
-the token. The bearer token rides curl's stdin (`--header @-`), so it never
-appears in a process argv, and it lives only in `credentials.json` (mode
-0600), never in `state.json` or any log. Every mutation, including mark-done,
-is a call into the poller CLI, so the entire I/O surface is two auditable
-scripts.
+**No Node.js, no Python, no external runtime.** A stock Omarchy install has no
+node on the graphical session PATH (Omarchy installs it through mise, whose
+shims are not exported to the session), so this plugin depends on nothing but
+Quickshell, `curl`, and `jq` for the one-time login. That is the same pattern
+the marketplace-validated MLB Booth and Pit Wall widgets use.
+
+The bearer token rides curl's stdin (`--header @-`) in both the login script
+and the QML service, so it never appears in a process argv, and it lives only
+in `credentials.json` (mode 0600), never in `state.json` or any log. The panel
+never sees it: only the last four characters reach the rendered state. The
+service is the single owner of the reply store, so marking a reply done takes
+effect immediately rather than round-tripping through a subprocess.
 
 Network hosts: `api.x.com` (GET only), plus your own BYOK completion endpoint
 (POST, only if configured). No telemetry, nothing sent anywhere else.

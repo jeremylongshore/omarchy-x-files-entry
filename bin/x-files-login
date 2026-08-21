@@ -1,116 +1,68 @@
-#!/usr/bin/env node
-// X Files login CLI. The ONLY code that ever writes the credentials
-// file. The plugin proper (QML and the poller both) treats credentials as
-// read-only; the widget's settings surface shows the token's last four
-// characters and nothing more.
-//
-//   printf %s "$TOKEN" | x-files-login --username <your-x-handle>
-//   x-files-login --username <your-x-handle>   (interactive: paste at prompt)
-//   x-files-login --forget
-//
-// The token is an X API app-only bearer token from the developer console at
-// https://console.x.com (pay-per-use credits). It is read from STDIN, never
-// from argv, so it never lands in shell history or a world-readable
-// /proc/<pid>/cmdline. This command resolves your numeric user id with one
-// users/by/username lookup, then writes
-// ~/.local/state/omarchy/x-files/credentials.json with mode 0600. The token
-// never prints, never lands in state.json, and reaches curl only via its
-// --header @- stdin, never an argv.
-"use strict"
+#!/usr/bin/env bash
+# X Files login. The ONLY code that ever writes the credentials file, and the
+# only shell script this plugin ships: everything else runs inside Quickshell,
+# because a stock Omarchy install has no node on the session PATH.
+#
+#   printf %s "$TOKEN" | x-files-login --username <your-x-handle>
+#   x-files-login --username <your-x-handle>      (interactive: paste at prompt)
+#   x-files-login --forget
+#
+# The token is read from STDIN, never from argv, so it never lands in shell
+# history or a world-readable /proc/<pid>/cmdline. It reaches curl through
+# `--header @-` (stdin) as well, so it is never visible to ps. Get an app-only
+# bearer token and pay-per-use credits at https://console.x.com
+set -euo pipefail
 
-var fs = require("fs")
-var path = require("path")
-var os = require("os")
-var childProcess = require("child_process")
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/x-files"
+CREDS="$STATE_DIR/credentials.json"
 
-var Model = require(path.join(__dirname, "..", "Model.js"))
+die() { printf 'x-files-login: %s\n' "$1" >&2; exit 1; }
 
-var STATE_DIR = path.join(
-  process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"),
-  "omarchy", "x-files")
-var CREDS_FILE = path.join(STATE_DIR, "credentials.json")
+USERNAME=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --forget)
+      rm -f "$CREDS"
+      printf 'x-files-login: credentials removed\n' >&2
+      exit 0
+      ;;
+    --username) USERNAME="${2:-}"; shift 2 ;;
+    --token)
+      die 'pass the token on STDIN, not --token (an argv token leaks via shell history and ps). Use: printf %s "$TOKEN" | x-files-login --username <handle>'
+      ;;
+    *) shift ;;
+  esac
+done
 
-function die(msg) {
-  process.stderr.write("x-files-login: " + msg + "\n")
-  process.exit(1)
-}
+USERNAME="${USERNAME#@}"
+[[ -n $USERNAME ]] || die 'usage: printf %s "$TOKEN" | x-files-login --username <handle>'
+[[ $USERNAME =~ ^[A-Za-z0-9_]{1,15}$ ]] || die 'that does not look like an X handle'
 
-function main() {
-  var args = process.argv.slice(2)
-  if (args.indexOf("--forget") >= 0) {
-    try { fs.unlinkSync(CREDS_FILE) } catch (e) { /* already gone */ }
-    process.stderr.write("x-files-login: credentials removed\n")
-    return
-  }
-  var uIdx = args.indexOf("--username")
-  var username = uIdx >= 0 ? String(args[uIdx + 1] || "") : ""
+if [[ -t 0 ]]; then
+  printf 'Paste your X API bearer token, then press Enter:\n' >&2
+fi
+IFS= read -r TOKEN || true
+TOKEN="${TOKEN//[$'\r\n']/}"
+[[ -n $TOKEN ]] || die 'no token on stdin'
+[[ $TOKEN =~ ^[A-Za-z0-9%_-]{20,}$ ]] || die 'that does not look like a bearer token'
 
-  // The token is read from STDIN, never from argv: a token on the command line
-  // lands in shell history and is visible in `ps`/`/proc/<pid>/cmdline` (world
-  // readable by default) for the life of this process. Stdin keeps it out of
-  // both. Usage: `printf %s "$TOKEN" | x-files-login --username <handle>`, or
-  // run it interactively and paste the token at the prompt.
-  var tIdx = args.indexOf("--token")
-  var token = ""
-  if (tIdx >= 0) {
-    die("pass the token on STDIN, not --token (an argv token leaks via shell "
-      + "history and ps). Use: printf %s \"$TOKEN\" | x-files-login --username <handle>")
-  }
-  if (!username) {
-    die("usage: printf %s \"$TOKEN\" | x-files-login --username <handle>")
-  }
-  if (process.stdin.isTTY) {
-    process.stderr.write("Paste your X API bearer token, then press Enter:\n")
-  }
-  try {
-    token = String(fs.readFileSync(0, "utf8")).replace(/[\r\n]+$/, "").trim()
-  } catch (e) {
-    die("could not read the token from stdin")
-  }
-  if (!token) die("no token on stdin")
-  username = username.replace(/^@/, "")
-  if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) die("that does not look like an X handle")
-  if (!/^[A-Za-z0-9%_-]{20,}$/.test(token)) die("that does not look like a bearer token")
+# One lookup proves the token works and resolves the numeric user id. The
+# Authorization header rides stdin, so the token is invisible to ps.
+URL="https://api.x.com/2/users/by/username/${USERNAME}?user.fields=username,name"
+RESPONSE=$(printf 'Authorization: Bearer %s\n' "$TOKEN" | curl -fsS \
+  --proto '=https' --max-time 20 --max-filesize 2000000 \
+  --header @- -- "$URL") || die 'lookup failed. Check the token and that your credits are active.'
 
-  // One lookup proves the token works and resolves the numeric id. The
-  // Authorization header rides curl's stdin (--header @-), never argv, so
-  // the token is invisible to ps for the lifetime of the request.
-  var res = childProcess.spawnSync("curl", [
-    "-fsS", "--proto", "=https", "--max-time", "20",
-    "--max-filesize", String(Model.MAX_BODY_CHARS),
-    "--header", "@-",
-    "--", Model.userByUsernameUrl(username)
-  ], {
-    input: "Authorization: Bearer " + token + "\n",
-    encoding: "utf8",
-    maxBuffer: Model.MAX_BODY_CHARS + 65536,
-    timeout: 25000
-  })
-  if (res.status !== 0) {
-    die("lookup failed (" + String(res.stderr || "").trim().slice(0, 120)
-      + "). Check the token and that your credits are active.")
-  }
-  var user = Model.parseUserLookup(res.stdout)
-  if (!user) die("could not parse the user lookup response")
+USER_ID=$(printf '%s' "$RESPONSE" | jq -r '.data.id // empty')
+RESOLVED=$(printf '%s' "$RESPONSE" | jq -r '.data.username // empty')
+[[ -n $USER_ID ]] || die 'could not parse the user lookup response'
 
-  fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
-  var tmp = CREDS_FILE + ".tmp." + process.pid
-  // "wx" (O_CREAT|O_EXCL) so a pre-planted symlink at the predictable tmp
-  // path is refused rather than followed with the token bytes.
-  try {
-    fs.writeFileSync(tmp, JSON.stringify({
-      bearerToken: token,
-      userId: user.id,
-      username: user.username
-    }), { mode: 0o600, flag: "wx" })
-    fs.renameSync(tmp, CREDS_FILE)
-  } catch (e) {
-    try { fs.unlinkSync(tmp) } catch (e2) { /* nothing to clean */ }
-    die("could not write credentials: " + String(e.message || e))
-  }
+mkdir -p -m 700 "$STATE_DIR"
+TMP=$(mktemp "$CREDS.XXXXXX")
+chmod 600 "$TMP"
+jq -n --arg t "$TOKEN" --arg i "$USER_ID" --arg u "${RESOLVED:-$USERNAME}" \
+  '{bearerToken:$t, userId:$i, username:$u}' > "$TMP"
+mv "$TMP" "$CREDS"
 
-  process.stderr.write("x-files-login: connected @" + user.username
-    + " (token ending " + token.slice(-4) + "). Run x-files-poll to start.\n")
-}
-
-main()
+printf 'x-files-login: connected @%s (token ending %s). The widget picks it up within a minute.\n' \
+  "${RESOLVED:-$USERNAME}" "${TOKEN: -4}" >&2

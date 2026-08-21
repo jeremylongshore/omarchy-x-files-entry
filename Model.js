@@ -826,6 +826,223 @@ function parseState(raw) {
   return out
 }
 
+
+// ---- Store management. These were the poller CLI's internals; they live here
+//      now so the same pure code runs in Quickshell and in the offline suite.
+//      "internal" is the working set: { ownPosts, replies{postId:[]},
+//      mentionReplies[], doneIds{}, notifiedIds{}, summaries{}, ledger, ... }.
+
+function emptyInternal() {
+  return {
+    firstRun: true, sinceTweets: "", sinceMentions: "", perConv: {},
+    ownPosts: [], replies: {}, mentionReplies: [], doneIds: {},
+    notifiedIds: {}, summaries: {}, ledger: { month: "", posts: 0, dollars: 0 }
+  }
+}
+
+// X ids are numeric strings too big for Number; compare by length then
+// lexicographically. Monotonic: never returns the smaller of the two.
+function maxId(a, b) {
+  var sa = String(a || "")
+  var sb = String(b || "")
+  if (!sa) return sb
+  if (!sb) return sa
+  if (sa.length !== sb.length) return sa.length > sb.length ? sa : sb
+  return sa > sb ? sa : sb
+}
+
+// Raw parsed tweets -> classified reply records, dropping the user's own.
+function classifyIngest(tweets, selfUserId) {
+  var out = []
+  var list = tweets || []
+  for (var i = 0; i < list.length; i++) {
+    var t = list[i]
+    if (t.authorId === String(selfUserId)) continue
+    out.push({
+      id: t.id,
+      text: t.text,
+      authorId: t.authorId,
+      authorUsername: t.authorUsername,
+      conversationId: t.conversationId,
+      replyParentId: t.replyParentId,
+      createdMs: t.createdMs,
+      metrics: t.metrics,
+      bucket: classifyReply(t.text),
+      substance: substanceScore(t.text, t.metrics)
+    })
+  }
+  return out
+}
+
+// Choose an eviction victim when a pool exceeds the cap: prefer an already
+// done reply, then one that does not need a reply (praise/noise/low
+// substance), and only as a last resort index 0. Never silently drop an
+// unread reply still in the queue while a droppable one exists.
+function evictOne(pool, internal, selfUserId) {
+  var idx = -1
+  for (var i = 0; i < pool.length; i++) {
+    if (internal.doneIds[pool[i].id]) { idx = i; break }
+  }
+  if (idx < 0) {
+    for (var j = 0; j < pool.length; j++) {
+      if (!needsReply(pool[j], selfUserId)) { idx = j; break }
+    }
+  }
+  if (idx < 0) idx = 0
+  pool.splice(idx, 1)
+}
+
+// New replies land in the per-post store keyed by the tweet they actually
+// reply to (correct for self-threads, where every post shares one
+// conversation id), falling back to a conversation match, then the mentions
+// pool.
+function ingestReplies(internal, replies, selfUserId) {
+  var list = replies || []
+  for (var i = 0; i < list.length; i++) {
+    var r = list[i]
+    var postId = null
+    if (r.replyParentId) {
+      for (var j = 0; j < internal.ownPosts.length; j++) {
+        if (internal.ownPosts[j].id === r.replyParentId) { postId = internal.ownPosts[j].id; break }
+      }
+    }
+    if (!postId) {
+      for (var j2 = 0; j2 < internal.ownPosts.length; j2++) {
+        if (internal.ownPosts[j2].conversationId === r.conversationId) { postId = internal.ownPosts[j2].id; break }
+      }
+    }
+    var pool = postId
+      ? (internal.replies[postId] = internal.replies[postId] || [])
+      : internal.mentionReplies
+    var exists = false
+    for (var e = 0; e < pool.length; e++) {
+      if (pool[e].id === r.id) { exists = true; break }
+    }
+    if (exists) continue
+    pool.push(r)
+    if (pool.length > MAX_REPLIES_PER_POST) evictOne(pool, internal, selfUserId)
+  }
+  for (var p in internal.replies) collapseDuplicates(internal.replies[p])
+  collapseDuplicates(internal.mentionReplies)
+  return internal
+}
+
+function allReplies(internal) {
+  var out = []
+  for (var p in internal.replies) out = out.concat(internal.replies[p])
+  return out.concat(internal.mentionReplies)
+}
+
+function buildQueue(internal, selfUserId) {
+  var all = allReplies(internal)
+  // A dedup cluster is handled once ANY member is done, so a fresh
+  // higher-engagement duplicate cannot reopen a cluster the user cleared.
+  var doneGroups = {}
+  for (var d = 0; d < all.length; d++) {
+    if (internal.doneIds[all[d].id]) doneGroups[all[d].groupId || all[d].id] = true
+  }
+  var queue = []
+  for (var i = 0; i < all.length; i++) {
+    var r = all[i]
+    // Filter done and handled-cluster items BEFORE the cap slice, so an old
+    // but still-open item is never pushed past the cutoff by handled ones.
+    if (internal.doneIds[r.id]) continue
+    if (doneGroups[r.groupId || r.id]) continue
+    if (!needsReply(r, selfUserId)) continue
+    queue.push({
+      id: r.id,
+      text: r.text,
+      authorUsername: r.authorUsername,
+      bucket: r.bucket,
+      substance: r.substance,
+      dupCount: r.dupCount || 0,
+      createdMs: r.createdMs,
+      url: threadUrl(r.authorUsername, r.id),
+      done: false
+    })
+  }
+  queue.sort(function(a, b) { return b.createdMs - a.createdMs })
+  return queue.slice(0, MAX_QUEUE)
+}
+
+function buildDigests(internal, nowMs) {
+  var out = []
+  for (var i = 0; i < internal.ownPosts.length; i++) {
+    var post = internal.ownPosts[i]
+    var replies = internal.replies[post.id] || []
+    if (replies.length === 0 && post.metrics.replies === 0) continue
+    var unread = 0
+    for (var u = 0; u < replies.length; u++) {
+      if (!internal.doneIds[replies[u].id] && !internal.notifiedIds[replies[u].id]) unread++
+    }
+    var key = summaryCacheKey(post.id, replies.length)
+    out.push({
+      postId: post.id,
+      postText: clean(post.text, 120),
+      url: "",
+      createdMs: post.createdMs,
+      totalReplies: Math.max(replies.length, post.metrics.replies),
+      newReplies: unread,
+      velocity: velocityPerHour(replies, nowMs),
+      buckets: bucketCounts(replies),
+      quotes: topQuotes(replies),
+      summary: internal.summaries[key] || ""
+    })
+  }
+  return out
+}
+
+// Absorb newly fetched own-posts, then prune to the freshest tracked set and
+// drop the reply pools / conversation markers that just aged out, so the
+// store cannot grow without bound.
+function absorbOwnPosts(internal, tweets, nowMs) {
+  var list = tweets || []
+  for (var i = 0; i < list.length; i++) {
+    var p = list[i]
+    internal.ownPosts.unshift({
+      id: p.id, text: p.text, createdMs: p.createdMs,
+      conversationId: p.conversationId, metrics: p.metrics
+    })
+  }
+  var cutoff = num(nowMs) - TRACKED_POST_MAX_AGE_DAYS * 86400000
+  var seen = {}
+  var kept = []
+  internal.ownPosts.sort(function(a, b) { return b.createdMs - a.createdMs })
+  for (var j = 0; j < internal.ownPosts.length; j++) {
+    var op = internal.ownPosts[j]
+    if (seen[op.id] || op.createdMs < cutoff) continue
+    seen[op.id] = true
+    if (kept.length < TRACKED_POSTS_MAX) kept.push(op)
+  }
+  internal.ownPosts = kept
+
+  var keptIds = {}
+  var keptConvs = {}
+  for (var k = 0; k < internal.ownPosts.length; k++) {
+    keptIds[internal.ownPosts[k].id] = true
+    keptConvs[internal.ownPosts[k].conversationId] = true
+  }
+  for (var rid in internal.replies) if (!keptIds[rid]) delete internal.replies[rid]
+  for (var cid in internal.perConv) if (!keptConvs[cid]) delete internal.perConv[cid]
+  return internal
+}
+
+// Which tracked post, if any, should be fanned out next: reply_count says
+// more replies exist than we have stored. Returns null when nothing is owed.
+function nextFanoutPost(internal, alreadyFanned, cap) {
+  if (alreadyFanned >= (cap || 0)) return null
+  for (var k = 0; k < internal.ownPosts.length; k++) {
+    var post = internal.ownPosts[k]
+    var known = (internal.replies[post.id] || []).length
+    if (post.metrics.replies > known) {
+      var doneCount = 0
+      for (var f = 0; f < alreadyFanned; f++) doneCount++
+      return post
+    }
+  }
+  return null
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
     MAX_BODY_CHARS: MAX_BODY_CHARS,
@@ -884,6 +1101,16 @@ if (typeof module !== "undefined") {
     summaryRequestBody: summaryRequestBody,
     parseSummary: parseSummary,
     emptyState: emptyState,
-    parseState: parseState
+    parseState: parseState,
+    emptyInternal: emptyInternal,
+    maxId: maxId,
+    classifyIngest: classifyIngest,
+    evictOne: evictOne,
+    ingestReplies: ingestReplies,
+    allReplies: allReplies,
+    buildQueue: buildQueue,
+    buildDigests: buildDigests,
+    absorbOwnPosts: absorbOwnPosts,
+    nextFanoutPost: nextFanoutPost
   }
 }
