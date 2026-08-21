@@ -468,7 +468,9 @@ Panel {
                   anchors.fill: parent
                   acceptedButtons: Qt.LeftButton | Qt.RightButton
                   onClicked: function(mouse) {
-                    root.selIdx = qItem.index
+                    // selIdx is a readonly, id-derived computed property; move
+                    // the cursor by setting the tracked id, not the index.
+                    root.selectedId = qItem.modelData.id
                     if (mouse.button === Qt.RightButton) root.markSelectedDone()
                     else root.openSelected()
                   }
