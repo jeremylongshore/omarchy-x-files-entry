@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="X Files. Read the replies to your own X posts.">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0d0b12"/>
+      <stop offset="1" stop-color="#08070c"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.14" cy="0.1" r="0.7">
+      <stop offset="0" stop-color="#e0a83c" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#e0a83c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#e0a83c"/>
+      <stop offset="1" stop-color="#c25a3c"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1200" height="340" fill="url(#bg)"/>
+  <rect width="1200" height="340" fill="url(#glow)"/>
+
+  <!-- Reply threads crossing into an X behind the pill mocks: every line is
+       a conversation coming back to you. Low opacity, clear of the baselines. -->
+  <g fill="none" opacity="0.5" stroke-linecap="round">
+    <g stroke="#c25a3c" stroke-width="2.5" opacity="0.5">
+      <path d="M 940 -20 L 1180 300"/>
+      <path d="M 1180 -20 L 940 300"/>
+    </g>
+    <g stroke="#e0a83c" stroke-width="1.5" opacity="0.35">
+      <path d="M 972 30 L 1148 30"/>
+      <path d="M 984 78 L 1136 78"/>
+      <path d="M 1000 128 L 1120 128"/>
+    </g>
+    <!-- reply nodes on the threads -->
+    <circle cx="1060" cy="140" r="5" fill="#e0a83c" stroke="none">
+      <animate attributeName="opacity" values="1;0.3;1" dur="2.1s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="1004" cy="76" r="3" fill="#c25a3c" stroke="none"/>
+    <circle cx="1120" cy="196" r="3" fill="#c25a3c" stroke="none"/>
+  </g>
+
+  <!-- Folder tab with a redaction bar, low left, below the feature baseline -->
+  <g transform="translate(96,262)" opacity="0.8">
+    <path d="M 0,0 L 44,0 L 52,-12 L 96,-12 L 96,44 L 0,44 Z" fill="none" stroke="#8a6b32" stroke-width="2.5"/>
+    <rect x="12" y="10" width="60" height="7" rx="2" fill="#e0a83c" opacity="0.85"/>
+    <rect x="12" y="24" width="40" height="6" rx="2" fill="#5a5348"/>
+  </g>
+
+  <!-- Title block -->
+  <text x="72" y="132" font-family="'JetBrains Mono',ui-monospace,'SF Mono',Menlo,'DejaVu Sans Mono',monospace" font-size="72" font-weight="700" letter-spacing="8" fill="#efe9dc">X FILES</text>
+  <rect x="76" y="158" width="330" height="4" fill="url(#rule)"/>
+  <text x="72" y="204" font-family="'JetBrains Mono',ui-monospace,'SF Mono',Menlo,'DejaVu Sans Mono',monospace" font-size="24" letter-spacing="1" fill="#c3bcae">Read the replies to your own posts.</text>
+  <text x="72" y="238" font-family="'JetBrains Mono',ui-monospace,'SF Mono',Menlo,'DejaVu Sans Mono',monospace" font-size="16" letter-spacing="1" fill="#857e70">needs-reply queue · per-post digests · verbatim quotes · spend meter</text>
+
+  <!-- Bar pill mocks, top right -->
+  <g transform="translate(812,46)">
+    <rect x="0" y="0" width="318" height="46" rx="8" fill="#120f17" stroke="#332a3f" stroke-width="1.5"/>
+    <text x="16" y="30" font-family="'JetBrains Mono',ui-monospace,'SF Mono',Menlo,'DejaVu Sans Mono',monospace" font-size="17" fill="#efe9dc">Replies: 3</text>
+    <circle cx="298" cy="23" r="5" fill="#e0a83c"/>
+  </g>
+
+  <!-- Spend meter + queue card, the widget's identity and its pitch -->
+  <g transform="translate(812,104)">
+    <rect x="0" y="0" width="318" height="190" rx="6" fill="#0c0a11" stroke="#332a3f" stroke-width="1.5"/>
+    <g font-family="'JetBrains Mono',ui-monospace,'SF Mono',Menlo,'DejaVu Sans Mono',monospace">
+      <text x="16" y="30" font-size="15" fill="#efe9dc">$1.83 this month <tspan fill="#857e70">· cap $8.00</tspan></text>
+      <rect x="16" y="42" width="286" height="6" rx="3" fill="#241d2c"/>
+      <rect x="16" y="42" width="66" height="6" rx="3" fill="#e0a83c"/>
+      <text x="16" y="82" font-size="12" letter-spacing="2" fill="#a9803a">NEEDS YOUR REPLY · 3</text>
+      <text x="16" y="108" font-size="14" fill="#efe9dc">@wayland_user <tspan fill="#857e70">gripe · +1</tspan></text>
+      <text x="16" y="130" font-size="13" fill="#b9b2a4">panel crashes on open on Wayland</text>
+      <text x="16" y="158" font-size="14" fill="#efe9dc">@feature_fan <tspan fill="#857e70">ask</tspan></text>
+      <text x="16" y="178" font-size="13" fill="#b9b2a4">could you add per-provider toggles?</text>
+    </g>
+  </g>
+</svg>

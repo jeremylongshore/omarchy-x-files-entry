@@ -73,28 +73,45 @@ Panel {
   readonly property string label: Model.pillText(pillState)
   readonly property string tooltip: Model.tooltipText(pillState, nowMs)
 
-  property int selIdx: 0
+  // The cursor tracks the reply's ID, not a raw index: a background poll can
+  // insert a newer reply at the top of the newest-first queue, which would
+  // shift every index, so an index cursor would silently point at a different
+  // reply than the one the user is looking at.
+  property string selectedId: ""
+
+  readonly property int selIdx: {
+    for (var i = 0; i < openQueue.length; i++) if (openQueue[i].id === selectedId) return i
+    return openQueue.length > 0 ? 0 : -1
+  }
 
   onOpenQueueChanged: {
-    if (selIdx >= openQueue.length) selIdx = openQueue.length > 0 ? openQueue.length - 1 : 0
+    // Re-anchor to the tracked id; if it is gone (marked done, aged out),
+    // fall back to the top of the queue.
+    var found = false
+    for (var i = 0; i < openQueue.length; i++) if (openQueue[i].id === selectedId) { found = true; break }
+    if (!found) selectedId = openQueue.length > 0 ? openQueue[0].id : ""
   }
 
   function moveCursor(dy) {
     if (openQueue.length === 0) return
-    var next = selIdx + dy
+    var cur = selIdx < 0 ? 0 : selIdx
+    var next = cur + dy
     if (next < 0) next = 0
     if (next >= openQueue.length) next = openQueue.length - 1
-    selIdx = next
+    selectedId = openQueue[next].id
   }
 
   function selectedItem() {
-    return selIdx >= 0 && selIdx < openQueue.length ? openQueue[selIdx] : null
+    for (var i = 0; i < openQueue.length; i++) if (openQueue[i].id === selectedId) return openQueue[i]
+    return openQueue.length > 0 ? openQueue[0] : null
   }
 
   // ---- Mark-done: queue the write if one is in flight so no keystroke is
   //      dropped (the busy-guard-drops-the-write bug the reviewer panel
-  //      caught on the sibling plugin).
+  //      caught on the sibling plugin). A pending "clear all" is a separate
+  //      boolean, never a sentinel string smuggled into the id list.
   property var queuedDone: []
+  property bool queuedAll: false
 
   function openSelected() {
     var it = selectedItem()
@@ -137,8 +154,9 @@ Panel {
     for (var i = 0; i < queue.length; i++) overlay[queue[i].id] = true
     pendingDone = overlay
     if (markProc.running) {
-      queuedDone = ["*all*"]
+      queuedAll = true
     } else {
+      queuedAll = false
       queuedDone = []
       markProc.command = [pollerPath, "--mark-all-done"]
       markProc.running = true
@@ -199,14 +217,16 @@ Panel {
   Process {
     id: markProc
     onExited: {
-      if (root.queuedDone.length > 0) {
+      // A pending "clear all" supersedes any queued individual ids.
+      if (root.queuedAll) {
+        root.queuedAll = false
+        root.queuedDone = []
+        markProc.command = [root.pollerPath, "--mark-all-done"]
+        markProc.running = true
+      } else if (root.queuedDone.length > 0) {
         var pending = root.queuedDone
         root.queuedDone = []
-        if (pending.length === 1 && pending[0] === "*all*") {
-          markProc.command = [root.pollerPath, "--mark-all-done"]
-        } else {
-          markProc.command = [root.pollerPath, "--mark-done"].concat(pending)
-        }
+        markProc.command = [root.pollerPath, "--mark-done"].concat(pending)
         markProc.running = true
       } else {
         root.reread()
@@ -566,7 +586,7 @@ Panel {
             Text {
               anchors.left: parent.left
               anchors.leftMargin: Style.space(16)
-              text: "j/k move · enter open · m done · c clear · r refresh"
+              text: "j/k move · enter open · x done · c clear · r refresh"
               textFormat: Text.PlainText
               color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family

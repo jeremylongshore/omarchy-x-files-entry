@@ -13,15 +13,19 @@ and a hostile reply must never fetch, execute, or mis-render inside the shell.
   `credentials.json`. The QML widget and the poller never write it; the
   widget never reads it at all. Settings show only the token's last four
   characters, sourced from `state.json`.
-- **The token never enters an argv.** Both CLIs pass the `Authorization:
-  Bearer` header to curl over stdin (`--header @-`), so the token is invisible
-  to `ps` for the lifetime of every request. It appears only in
+- **The token never enters an argv, at any step.** The login command reads
+  the token from **stdin** (`printf %s "$TOKEN" | x-files-login …`, or an
+  interactive paste), never from `--token`, so it never lands in shell
+  history or a world-readable `/proc/<pid>/cmdline`; passing `--token` is
+  refused with an explanation. Both CLIs then hand the `Authorization: Bearer`
+  header to curl over stdin (`--header @-`), so the token is invisible to
+  `ps` for the lifetime of every request. It appears only in
   `credentials.json`, never in `state.json`, never in a log line, never in a
   notification.
 - **File modes.** `credentials.json` and its directory are mode 0600/0700;
-  the atomic writer opens the tmp file `wx` (`O_CREAT|O_EXCL`), so a
-  same-uid attacker cannot redirect the write through a pre-planted symlink
-  at the predictable path.
+  the atomic writer in BOTH CLIs opens the tmp file `wx` (`O_CREAT|O_EXCL`)
+  and unlinks on failure, so a same-uid attacker cannot redirect the write
+  through a pre-planted symlink at the predictable path.
 
 ## Architecture control
 
@@ -68,9 +72,14 @@ in two auditable scripts:
 
 The monthly ledger is charged per returned post; at the configured cap the
 poller stops fetching entirely until the month rolls over (`budgetStopped`),
-and the panel shows a hard-stop banner. `since_id` on every fetch and a
-reply-count-gated fan-out keep the spend proportional to real new activity,
-not to poll frequency.
+and the panel shows a hard-stop banner. Two defenses make the cap robust
+against a mis-set price: `costPerPost` is clamped to a floor, and a second,
+price-independent read-count ceiling (derived from the dollar cap at that
+floor) also hard-stops the poll, so an implausibly low rate cannot let the
+dollar meter read ~$0 while real reads run unbounded. The cap is re-checked
+before every fetch within a poll, so a cycle that starts under the cap
+cannot overshoot it. `since_id` on every fetch and a reply-count-gated
+fan-out keep spend proportional to real new activity, not to poll frequency.
 
 ## What this plugin reads and writes
 

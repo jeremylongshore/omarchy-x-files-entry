@@ -85,7 +85,11 @@ function readSettings() {
       return {
         notifications: e.notifications === "Off" ? "Off" : "On",
         monthlyCapUsd: Number(e.monthlyCapUsd) > 0 ? Number(e.monthlyCapUsd) : defaults.monthlyCapUsd,
-        costPerPost: Number(e.costPerPost) > 0 ? Number(e.costPerPost) : defaults.costPerPost,
+        // Clamp to the floor: a costPerPost set implausibly low (fat-finger, or
+        // a process that can write shell.json) would let the dollar meter read
+        // ~$0 while X bills for real. The floor plus the read-count ceiling in
+        // budgetStopped make the number of reads bounded regardless of price.
+        costPerPost: Model.clampCost(e.costPerPost),
         aiBaseUrl: typeof e.aiBaseUrl === "string" ? e.aiBaseUrl : "",
         aiModel: typeof e.aiModel === "string" ? e.aiModel : "",
         aiApiKey: typeof e.aiApiKey === "string" ? e.aiApiKey : ""
@@ -172,21 +176,32 @@ function poll(opts) {
     notifiedIds: {}, summaries: {}, ledger: { month: "", posts: 0, dollars: 0 }
   }
 
-  function flush(extra) {
-    // Close the race with a concurrent mark-done: the panel may have written
-    // doneIds/notifiedIds to internal.json while this poll's fetch loop ran.
-    // Re-read the current on-disk flags and union them in (both are
-    // monotonic, so a union is always correct) before overwriting.
-    var current = readJson(INTERNAL_FILE, null)
-    if (current) {
-      var cd = current.doneIds || {}
-      for (var dk in cd) if (cd[dk]) internal.doneIds[dk] = true
-      var cn = current.notifiedIds || {}
-      for (var nk in cn) if (cn[nk]) internal.notifiedIds[nk] = true
+  // Merge the monotonic progress on disk into this in-memory `internal` right
+  // before a write, so a concurrent mark-done (doneIds/notifiedIds) or another
+  // poll's progress (ledger totals, since_id markers, per-conversation
+  // markers) is never reverted by a stale snapshot. doneIds/notifiedIds are
+  // unions; ledger/since take the larger value; this is always correct because
+  // every one of these fields only ever moves forward within a month.
+  function mergeProgressFromDisk() {
+    var disk = readJson(INTERNAL_FILE, null)
+    if (!disk) return
+    var cd = disk.doneIds || {}
+    for (var dk in cd) if (cd[dk]) internal.doneIds[dk] = true
+    var cn = disk.notifiedIds || {}
+    for (var nk in cn) if (cn[nk]) internal.notifiedIds[nk] = true
+    if (disk.ledger && internal.ledger && disk.ledger.month === internal.ledger.month) {
+      internal.ledger.posts = Math.max(Number(internal.ledger.posts) || 0, Number(disk.ledger.posts) || 0)
+      internal.ledger.dollars = Math.max(Number(internal.ledger.dollars) || 0, Number(disk.ledger.dollars) || 0)
     }
-    var queue = buildQueue(internal, creds ? creds.userId : "")
-    var posts = buildDigests(internal, nowMs)
-    var state = {
+    internal.sinceTweets = maxId(internal.sinceTweets, disk.sinceTweets)
+    internal.sinceMentions = maxId(internal.sinceMentions, disk.sinceMentions)
+    if (disk.perConv) {
+      for (var c in disk.perConv) internal.perConv[c] = maxId(internal.perConv[c], disk.perConv[c])
+    }
+  }
+
+  function buildStateObject(extra) {
+    return {
       generatedAt: nowMs,
       configured: !!creds,
       stopped: Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs),
@@ -195,23 +210,31 @@ function poll(opts) {
         ? { username: creds.username, last4: String(creds.bearerToken || "").slice(-4) }
         : { username: "", last4: "" },
       ledger: internal.ledger,
-      queue: queue,
-      posts: posts,
+      queue: buildQueue(internal, creds ? creds.userId : ""),
+      posts: buildDigests(internal, nowMs),
       lastError: (extra && extra.lastError) || ""
     }
+  }
+
+  // The single writer for a poll cycle: merge disk progress, build the state,
+  // and write both files ONCE. Notifications mutate internal.notifiedIds
+  // before this runs, so there is never a second, un-merged internal write.
+  function commit(extra) {
+    mergeProgressFromDisk()
+    var state = buildStateObject(extra)
     writeAtomic(STATE_FILE, JSON.stringify(state))
     writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
     return state
   }
 
   if (!creds || !creds.bearerToken || !creds.userId) {
-    flush({})
+    commit({})
     process.stderr.write("x-files-poll: not configured, run x-files-login\n")
     return
   }
 
   if (Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs)) {
-    flush({})
+    commit({})
     process.stderr.write("x-files-poll: monthly cap reached, not fetching\n")
     return
   }
@@ -222,6 +245,12 @@ function poll(opts) {
   function charge(n) {
     charged += n
     internal.ledger = Model.chargeLedger(internal.ledger, n, settings.costPerPost, nowMs)
+  }
+
+  // Re-checked before every fetch after the first, so a poll that starts just
+  // under the cap cannot overshoot it by a whole poll's worth of reads.
+  function overCap() {
+    return Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs)
   }
 
   // 1. Own recent posts (the parents replies attach to).
@@ -250,6 +279,20 @@ function poll(opts) {
         if (kept.length < Model.TRACKED_POSTS_MAX) kept.push(op)
       }
       internal.ownPosts = kept
+
+      // Prune reply pools and conversation markers for posts that just aged
+      // out, so internal.json cannot grow without bound and an orphaned pool
+      // cannot keep feeding the queue for a post no longer tracked. A
+      // conversation marker is kept only while some tracked post still shares
+      // that conversation (self-threads share one conversation_id).
+      var keptIds = {}
+      var keptConvs = {}
+      for (var kp = 0; kp < internal.ownPosts.length; kp++) {
+        keptIds[internal.ownPosts[kp].id] = true
+        keptConvs[internal.ownPosts[kp].conversationId] = true
+      }
+      for (var rid in internal.replies) if (!keptIds[rid]) delete internal.replies[rid]
+      for (var cid in internal.perConv) if (!keptConvs[cid]) delete internal.perConv[cid]
     }
   } else if (own.code === 429) {
     errors.push("rate limited on own posts")
@@ -260,18 +303,21 @@ function poll(opts) {
   }
 
   // 2. Mentions: replies and quote-mentions from anywhere.
-  var men = apiGet(Model.mentionsUrl(creds.userId, internal.sinceMentions), creds.bearerToken)
+  var men = overCap() ? { code: 0, body: "" }
+    : apiGet(Model.mentionsUrl(creds.userId, internal.sinceMentions), creds.bearerToken)
   if (men.code === 200) {
     var menParsed = Model.parseTweetList(men.body)
     if (menParsed.valid) {
       charge(menParsed.resultCount)
       if (menParsed.newestId) internal.sinceMentions = maxId(internal.sinceMentions, menParsed.newestId)
-      ingestReplies(internal, classifyIngest(menParsed.tweets, creds.userId))
+      ingestReplies(internal, classifyIngest(menParsed.tweets, creds.userId), creds.userId)
     }
   } else if (men.code === 429) {
     errors.push("rate limited on mentions")
   } else if (men.code !== 0) {
     errors.push("mentions HTTP " + men.code)
+  } else if (!overCap()) {
+    errors.push("mentions fetch failed")
   }
 
   // 3. Reply-count-gated conversation fan-out: only conversations whose
@@ -279,6 +325,7 @@ function poll(opts) {
   //    poll so a viral day cannot blow the budget in one cycle.
   var fanned = 0
   for (var k = 0; k < internal.ownPosts.length && fanned < FANOUT_CAP_PER_POLL; k++) {
+    if (overCap()) { errors.push("spend cap reached mid-poll"); break }
     var post = internal.ownPosts[k]
     var known = (internal.replies[post.id] || []).length
     if (post.metrics.replies <= known) continue
@@ -294,11 +341,15 @@ function poll(opts) {
           internal.perConv[post.conversationId] =
             maxId(internal.perConv[post.conversationId], convParsed.newestId)
         }
-        ingestReplies(internal, classifyIngest(convParsed.tweets, creds.userId))
+        ingestReplies(internal, classifyIngest(convParsed.tweets, creds.userId), creds.userId)
       }
     } else if (conv.code === 429) {
       errors.push("rate limited on conversation search")
       break
+    } else if (conv.code !== 0) {
+      errors.push("conversation search HTTP " + conv.code)
+    } else {
+      errors.push("conversation search fetch failed")
     }
   }
 
@@ -306,17 +357,19 @@ function poll(opts) {
   maybeSummarize(internal, settings, nowMs)
 
   // 5. Notifications for queue items never notified before. Nothing on the
-  //    first run: history is not news.
-  var state = flush({ lastError: errors.join("; ").slice(0, 100) })
+  //    first run: history is not news. Notify mutates internal.notifiedIds,
+  //    then a SINGLE commit() writes both files, so there is no second,
+  //    un-merged internal write to clobber a concurrent mark-done.
+  mergeProgressFromDisk()
+  var preState = buildStateObject({ lastError: errors.join("; ").slice(0, 100) })
   if (!internal.firstRun && settings.notifications === "On" && !opts.noNotify) {
-    notifyNew(internal, state)
-    writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
+    notifyNew(internal, preState)
   } else if (internal.firstRun) {
     // Baseline: everything present at first poll is already notified.
-    for (var q = 0; q < state.queue.length; q++) internal.notifiedIds[state.queue[q].id] = true
+    for (var q = 0; q < preState.queue.length; q++) internal.notifiedIds[preState.queue[q].id] = true
     internal.firstRun = false
-    writeAtomic(INTERNAL_FILE, JSON.stringify(internal))
   }
+  var state = commit({ lastError: errors.join("; ").slice(0, 100) })
 
   process.stderr.write("x-files-poll: charged " + charged + " post reads ("
     + Model.spendText(internal.ledger, nowMs) + "), queue "
@@ -324,17 +377,22 @@ function poll(opts) {
     + (errors.length ? ", errors: " + errors.join("; ") : "") + "\n")
 }
 
-// New replies land in the per-conversation store when the conversation is a
-// tracked own post, otherwise in the mentions pool. Duplicate ids are
-// dropped; per-post stores are capped.
-function ingestReplies(internal, replies) {
+// New replies land in the per-post store keyed by the tweet they actually
+// reply to (correct for self-threads), falling back to a conversation match,
+// then the mentions pool. Duplicate ids are dropped; an over-cap pool evicts
+// a handled or low-value reply, never an unread item still in the queue.
+function ingestReplies(internal, replies, selfUserId) {
   for (var i = 0; i < replies.length; i++) {
     var r = replies[i]
     var postId = null
-    for (var j = 0; j < internal.ownPosts.length; j++) {
-      if (internal.ownPosts[j].conversationId === r.conversationId) {
-        postId = internal.ownPosts[j].id
-        break
+    if (r.replyParentId) {
+      for (var j = 0; j < internal.ownPosts.length; j++) {
+        if (internal.ownPosts[j].id === r.replyParentId) { postId = internal.ownPosts[j].id; break }
+      }
+    }
+    if (!postId) {
+      for (var j2 = 0; j2 < internal.ownPosts.length; j2++) {
+        if (internal.ownPosts[j2].conversationId === r.conversationId) { postId = internal.ownPosts[j2].id; break }
       }
     }
     var pool = postId
@@ -346,11 +404,29 @@ function ingestReplies(internal, replies) {
     }
     if (exists) continue
     pool.push(r)
-    if (pool.length > Model.MAX_REPLIES_PER_POST) pool.shift()
+    if (pool.length > Model.MAX_REPLIES_PER_POST) evictOne(pool, internal, selfUserId)
   }
   // Duplicate collapse runs per pool after ingest.
   for (var p in internal.replies) Model.collapseDuplicates(internal.replies[p])
   Model.collapseDuplicates(internal.mentionReplies)
+}
+
+// Choose an eviction victim when a pool exceeds the cap: prefer an already
+// done reply, then one that does not need a reply (praise/noise/low-substance),
+// and only as a last resort the oldest item overall. Never silently drop an
+// unread reply that is still in the queue while a droppable one exists.
+function evictOne(pool, internal, selfUserId) {
+  var idx = -1
+  for (var i = 0; i < pool.length; i++) {
+    if (internal.doneIds[pool[i].id]) { idx = i; break }
+  }
+  if (idx < 0) {
+    for (var j = 0; j < pool.length; j++) {
+      if (!Model.needsReply(pool[j], selfUserId)) { idx = j; break }
+    }
+  }
+  if (idx < 0) idx = 0
+  pool.splice(idx, 1)
 }
 
 function allReplies(internal) {
@@ -361,9 +437,19 @@ function allReplies(internal) {
 
 function buildQueue(internal, selfUserId) {
   var all = allReplies(internal)
+  // A dedup cluster is handled once ANY of its members is done, so a fresh
+  // higher-engagement duplicate cannot reopen a cluster the user cleared.
+  var doneGroups = {}
+  for (var d = 0; d < all.length; d++) {
+    if (internal.doneIds[all[d].id]) doneGroups[all[d].groupId || all[d].id] = true
+  }
   var queue = []
   for (var i = 0; i < all.length; i++) {
     var r = all[i]
+    // Filter done and handled-cluster items BEFORE the cap slice, so an old
+    // but still-open item is never pushed past the cutoff by handled ones.
+    if (internal.doneIds[r.id]) continue
+    if (doneGroups[r.groupId || r.id]) continue
     if (!Model.needsReply(r, selfUserId)) continue
     queue.push({
       id: r.id,
@@ -374,7 +460,7 @@ function buildQueue(internal, selfUserId) {
       dupCount: r.dupCount || 0,
       createdMs: r.createdMs,
       url: Model.threadUrl(r.authorUsername, r.id),
-      done: internal.doneIds[r.id] === true
+      done: false
     })
   }
   queue.sort(function(a, b) { return b.createdMs - a.createdMs })

@@ -44,6 +44,48 @@ the "+1" never reach the queue), correct bucket chips, two verbatim quotes,
 and a charged spend ledger. Fixtures are synthesized because API credits were
 not yet purchased; the live-capture procedure is in `docs/FIXTURES.md`.
 
+## Four-reviewer panel + claim audit (2026-08-21) and what they changed
+
+A full adversarial panel (security, correctness, taste, Omarchy-idiom) plus a
+claim-verifier audit ran against the built plugin. The idiom seat returned
+PASS with no blockers (every BarWidget/Panel/Service contract byte-verified
+against the marketplace-proven sibling). The others found real defects, now
+fixed:
+
+- **Security:** the login command took the token as an argv (`--token`), which
+  leaks it to shell history and `/proc/<pid>/cmdline` and contradicted the
+  stated "token never enters an argv" guarantee. The token is now read from
+  stdin only; `--token` is refused. The login writer also gained the `wx`
+  symlink guard the poller already had. Spend safety hardened: a cost floor,
+  a price-independent read-count ceiling, and a per-fetch cap re-check.
+- **Correctness (4 BLOCK):** the dedup threshold shipped at 0.7 in production
+  while the tests verified 0.55, so the advertised "+1 similar" collapse did
+  not actually fire in the binary; there is now a single `DUP_THRESHOLD` both
+  use. The panel cursor tracked a raw array index, so a background poll
+  inserting a newer reply could make a keystroke act on the wrong item; it now
+  tracks the reply id. An over-cap reply pool evicted the oldest item even if
+  it was an unread queue item; it now evicts a done or low-value reply first.
+  The internal-state write discipline did a second, un-merged write after
+  notify that could revert a concurrent mark-done (and the ledger, a spend
+  integrity issue); there is now one merged commit per poll.
+- **Correctness (FIX):** self-thread replies are routed by the specific
+  `replied_to` id, not the shared conversation id; the queue filters done and
+  handled-cluster items before the cap slice; a handled dedup cluster cannot
+  reopen when a fresher duplicate arrives; aged-out posts prune their reply
+  pools and conversation markers; mentions/conversation fetches gained the
+  missing error branches; the mark-all-done sentinel is a real boolean.
+- **Taste:** bucket chips pluralize per count ("1 question", not "1
+  questions"); a terse gripe ("broken") now clears the queue via a lower
+  gripe floor; the cost headline is an honest "$6 to $12/month" acknowledging
+  fan-out re-reads; the pill reads "Replies: at cap"; the manifest says
+  "switches to an alert color" not "turns loud".
+- **Claim audit:** the one refuted claim (a stale "49 tests" line in the
+  Listening Post README, which is actually 56) was corrected; every
+  security-sensitive claim (stdin-only token, no state.json leak, no X write
+  endpoints, strict `--exec` quoting, unconditional caps) came back CONFIRMED.
+
+The suite grew from 31 to 37 tests covering these fixes; all pass offline.
+
 ## Four-reviewer panel lessons applied pre-emptively
 
 X Files shares the poller-CLI + QML-render architecture that the sibling

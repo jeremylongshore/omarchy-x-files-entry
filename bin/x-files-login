@@ -4,16 +4,18 @@
 // read-only; the widget's settings surface shows the token's last four
 // characters and nothing more.
 //
-//   x-files-login --token <bearer-token> --username <your-x-handle>
+//   printf %s "$TOKEN" | x-files-login --username <your-x-handle>
+//   x-files-login --username <your-x-handle>   (interactive: paste at prompt)
 //   x-files-login --forget
 //
 // The token is an X API app-only bearer token from the developer console at
-// https://console.x.com (pay-per-use credits). This command resolves
-// your numeric user id with one users/by/username lookup, then writes
-// ~/.local/state/omarchy/x-files/credentials.json with mode 0600.
-// The token never prints, never lands in state.json, and never appears in
-// a process argv after this command exits (the poller passes it via an
-// env variable to curl's --header @- stdin, not argv).
+// https://console.x.com (pay-per-use credits). It is read from STDIN, never
+// from argv, so it never lands in shell history or a world-readable
+// /proc/<pid>/cmdline. This command resolves your numeric user id with one
+// users/by/username lookup, then writes
+// ~/.local/state/omarchy/x-files/credentials.json with mode 0600. The token
+// never prints, never lands in state.json, and reaches curl only via its
+// --header @- stdin, never an argv.
 "use strict"
 
 var fs = require("fs")
@@ -40,13 +42,32 @@ function main() {
     process.stderr.write("x-files-login: credentials removed\n")
     return
   }
-  var tIdx = args.indexOf("--token")
   var uIdx = args.indexOf("--username")
-  var token = tIdx >= 0 ? String(args[tIdx + 1] || "") : ""
   var username = uIdx >= 0 ? String(args[uIdx + 1] || "") : ""
-  if (!token || !username) {
-    die("usage: x-files-login --token <bearer-token> --username <handle>")
+
+  // The token is read from STDIN, never from argv: a token on the command line
+  // lands in shell history and is visible in `ps`/`/proc/<pid>/cmdline` (world
+  // readable by default) for the life of this process. Stdin keeps it out of
+  // both. Usage: `printf %s "$TOKEN" | x-files-login --username <handle>`, or
+  // run it interactively and paste the token at the prompt.
+  var tIdx = args.indexOf("--token")
+  var token = ""
+  if (tIdx >= 0) {
+    die("pass the token on STDIN, not --token (an argv token leaks via shell "
+      + "history and ps). Use: printf %s \"$TOKEN\" | x-files-login --username <handle>")
   }
+  if (!username) {
+    die("usage: printf %s \"$TOKEN\" | x-files-login --username <handle>")
+  }
+  if (process.stdin.isTTY) {
+    process.stderr.write("Paste your X API bearer token, then press Enter:\n")
+  }
+  try {
+    token = String(fs.readFileSync(0, "utf8")).replace(/[\r\n]+$/, "").trim()
+  } catch (e) {
+    die("could not read the token from stdin")
+  }
+  if (!token) die("no token on stdin")
   username = username.replace(/^@/, "")
   if (!/^[A-Za-z0-9_]{1,15}$/.test(username)) die("that does not look like an X handle")
   if (!/^[A-Za-z0-9%_-]{20,}$/.test(token)) die("that does not look like a bearer token")
@@ -74,12 +95,19 @@ function main() {
 
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
   var tmp = CREDS_FILE + ".tmp." + process.pid
-  fs.writeFileSync(tmp, JSON.stringify({
-    bearerToken: token,
-    userId: user.id,
-    username: user.username
-  }), { mode: 0o600 })
-  fs.renameSync(tmp, CREDS_FILE)
+  // "wx" (O_CREAT|O_EXCL) so a pre-planted symlink at the predictable tmp
+  // path is refused rather than followed with the token bytes.
+  try {
+    fs.writeFileSync(tmp, JSON.stringify({
+      bearerToken: token,
+      userId: user.id,
+      username: user.username
+    }), { mode: 0o600, flag: "wx" })
+    fs.renameSync(tmp, CREDS_FILE)
+  } catch (e) {
+    try { fs.unlinkSync(tmp) } catch (e2) { /* nothing to clean */ }
+    die("could not write credentials: " + String(e.message || e))
+  }
 
   process.stderr.write("x-files-login: connected @" + user.username
     + " (token ending " + token.slice(-4) + "). Run x-files-poll to start.\n")

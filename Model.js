@@ -16,13 +16,34 @@ var MAX_BODY_CHARS = 2000000
 
 // Pay-per-use pricing verified at docs.x.com/x-api/getting-started/pricing
 // (2026-08-20): a post read is $0.005/resource, but "owned reads" (your app
-// reading your own data) are $0.001 — a 5x swing. Replies come from other
+// reading your own data) are $0.001, a 5x swing (owned reads are cheaper).
+// Replies come from other
 // accounts (charged $0.005), while reading your own posts is an owned read;
 // which rate a given fetch bills at is worth confirming with the first $5 of
 // credits, so the per-post rate is a setting, not a constant. Monthly
 // pay-per-use is capped at 3M post reads. Credits: https://console.x.com
 var DEFAULT_COST_PER_POST = 0.005
 var DEFAULT_MONTHLY_CAP_USD = 8
+
+// A price-independent floor on the per-post cost. The dollar cap only bounds
+// real spend when costPerPost is honest; a fat-fingered or maliciously tiny
+// costPerPost would let the meter read ~$0 while X bills for real. Clamping to
+// this floor, and deriving an absolute post-read ceiling from it, means the
+// number of reads can never exceed cap / COST_FLOOR no matter how the price is
+// set. At the $0.001 owned-read rate this floor still leaves headroom; it only
+// bites values set implausibly low.
+var COST_FLOOR = 0.0005
+
+function clampCost(costPerPost) {
+  var c = num(costPerPost)
+  return c >= COST_FLOOR ? c : DEFAULT_COST_PER_POST
+}
+
+// The absolute post-read ceiling for a month, derived from the dollar cap at
+// the floor price. This is the second, price-independent hard stop.
+function readCeiling(capUsd) {
+  return Math.ceil(num(capUsd) / COST_FLOOR)
+}
 
 // How many of the user's own recent posts are tracked for reply fan-out,
 // and how old a post may be before its conversation stops being polled.
@@ -32,6 +53,13 @@ var TRACKED_POST_MAX_AGE_DAYS = 7
 // Store bounds.
 var MAX_REPLIES_PER_POST = 200
 var MAX_QUEUE = 50
+
+// The similarity threshold for collapsing near-duplicate replies. This is the
+// SINGLE source of truth: the poller and the unit suite both use it, so the
+// dedupe that the tests verify is the dedupe that ships. (An earlier version
+// defaulted to 0.7 in production while the tests overrode to 0.55, so the
+// advertised "+1 similar" collapse did not actually fire in the binary.)
+var DUP_THRESHOLD = 0.55
 
 var BUCKETS = ["praise", "gripe", "question", "feature_ask", "noise"]
 
@@ -196,11 +224,24 @@ function parseTweetList(raw) {
     var metrics = t.public_metrics || {}
     var author = users[String(t.author_id)] || { username: "", name: "" }
     var createdMs = Date.parse(t.created_at)
+    // The specific tweet this reply answers. On a self-thread every tweet
+    // shares one conversation_id, so routing a reply by conversation alone
+    // mis-attributes it to whichever thread post is newest; the replied_to
+    // reference carries the exact parent and is the correct routing key.
+    var refs = Array.isArray(t.referenced_tweets) ? t.referenced_tweets : []
+    var replyParentId = ""
+    for (var rr = 0; rr < refs.length; rr++) {
+      if (refs[rr] && refs[rr].type === "replied_to" && refs[rr].id) {
+        replyParentId = clean(refs[rr].id, 30)
+        break
+      }
+    }
     tweets.push({
       id: clean(t.id, 30),
       text: clean(t.text, 500),
       createdMs: isNaN(createdMs) ? 0 : createdMs,
       conversationId: clean(t.conversation_id || t.id, 30),
+      replyParentId: replyParentId,
       authorId: clean(t.author_id || "", 30),
       authorUsername: author.username,
       inReplyToUserId: clean(t.in_reply_to_user_id || "", 30),
@@ -365,11 +406,16 @@ function hybridSimilarity(a, b) {
 // into one canonical per group, chosen by engagement. Returns the input
 // items annotated in place with isCanonical and dupCount.
 function collapseDuplicates(replies, threshold) {
-  var th = threshold || 0.7
+  var th = threshold || DUP_THRESHOLD
   var list = replies || []
   for (var z = 0; z < list.length; z++) {
     list[z].isCanonical = true
     list[z].dupCount = 0
+    // groupId keys a dedup cluster to its canonical reply id. A singleton is
+    // its own group. The poller uses it to treat a whole cluster as handled
+    // once any member is marked done, so a fresh higher-engagement duplicate
+    // cannot silently reopen a cluster the user already cleared.
+    list[z].groupId = list[z].id
   }
   if (list.length <= 1) return list
   var parent = []
@@ -393,15 +439,21 @@ function collapseDuplicates(replies, threshold) {
   }
   for (var g in groups) {
     var members = groups[g]
-    if (members.length === 1) continue
-    var best = members[0]
-    for (var m = 1; m < members.length; m++) {
-      if (engagement(list[members[m]]) > engagement(list[best])) best = members[m]
+    var canonId = list[members[0]].id
+    if (members.length > 1) {
+      var best = members[0]
+      for (var m = 1; m < members.length; m++) {
+        if (engagement(list[members[m]]) > engagement(list[best])) best = members[m]
+      }
+      canonId = list[best].id
+      for (var n = 0; n < members.length; n++) {
+        list[members[n]].isCanonical = members[n] === best
+        list[members[n]].dupCount = members[n] === best ? members.length - 1 : 0
+      }
     }
-    for (var n = 0; n < members.length; n++) {
-      list[members[n]].isCanonical = members[n] === best
-      list[members[n]].dupCount = members[n] === best ? members.length - 1 : 0
-    }
+    // Every member of the cluster shares the canonical's id as its groupId,
+    // so a caller can collapse done-state across the whole cluster.
+    for (var q = 0; q < members.length; q++) list[members[q]].groupId = canonId
   }
   return list
 }
@@ -447,11 +499,13 @@ function bucketCounts(replies) {
 
 function bucketChips(counts) {
   var order = ["gripe", "question", "feature_ask", "praise", "noise"]
-  var labels = { gripe: "gripes", question: "questions", feature_ask: "asks", praise: "praise", noise: "noise" }
+  // Pluralize per count. praise/noise are mass nouns, invariant.
+  var singular = { gripe: "gripe", question: "question", feature_ask: "ask", praise: "praise", noise: "noise" }
+  var plural = { gripe: "gripes", question: "questions", feature_ask: "asks", praise: "praise", noise: "noise" }
   var parts = []
   for (var i = 0; i < order.length; i++) {
     var n = counts[order[i]]
-    if (n > 0) parts.push(n + " " + labels[order[i]])
+    if (n > 0) parts.push(n + " " + (n === 1 ? singular : plural)[order[i]])
   }
   return parts.join(" · ")
 }
@@ -496,12 +550,19 @@ function velocityPerHour(replies, nowMs) {
 
 var NEEDS_REPLY_BUCKETS = { question: true, gripe: true, feature_ask: true }
 var SUBSTANCE_FLOOR = 0.35
+// A gripe gets a lower floor than a question or a feature ask: a two-word
+// outage report ("broken", "it's down") is exactly the highest-stakes thing a
+// founder wants in the queue, and it scores low on the length/detail signals
+// the substance score rewards. "+1"/"same here" still floor to ~0.05 and stay
+// out. Questions clear 0.35 easily because the "?" already adds substance.
+var GRIPE_FLOOR = 0.2
 
 function needsReply(reply, selfUserId) {
   if (!reply) return false
   if (reply.authorId === String(selfUserId)) return false
   if (!NEEDS_REPLY_BUCKETS[reply.bucket]) return false
-  if (reply.substance < SUBSTANCE_FLOOR) return false
+  var floor = reply.bucket === "gripe" ? GRIPE_FLOOR : SUBSTANCE_FLOOR
+  if (reply.substance < floor) return false
   if (reply.isCanonical === false) return false
   return true
 }
@@ -529,7 +590,6 @@ function projectedMonthUsd(ledger, nowMs) {
   var d = new Date(num(nowMs))
   var dayOfMonth = d.getUTCDate()
   var daysInMonth = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate()
-  if (dayOfMonth < 1) return num(ledger.dollars)
   return Math.round((num(ledger.dollars) / dayOfMonth) * daysInMonth * 100) / 100
 }
 
@@ -542,9 +602,16 @@ function spendText(ledger, nowMs) {
   return usd(spent) + " this month, ~" + usd(projectedMonthUsd(ledger, nowMs)) + " projected"
 }
 
+// Two hard stops, whichever trips first: the dollar cap, and a
+// price-independent post-read ceiling derived from the cap at the floor
+// price. The second stop is what makes a too-low costPerPost unable to hide
+// runaway spend, because the read count is bounded no matter the price math.
 function budgetStopped(ledger, capUsd, nowMs) {
   if (!ledger || ledger.month !== monthKey(nowMs)) return false
-  return num(ledger.dollars) >= num(capUsd) && num(capUsd) > 0
+  if (num(capUsd) <= 0) return false
+  if (num(ledger.dollars) >= num(capUsd)) return true
+  if (num(ledger.posts) >= readCeiling(capUsd)) return true
+  return false
 }
 
 // ---- Pill and tooltip. The pill speaks only for the queue and the hard
@@ -553,7 +620,7 @@ function budgetStopped(ledger, capUsd, nowMs) {
 function pillText(state) {
   if (!state || !state.valid) return "…"
   if (!state.configured) return "X Files: setup"
-  if (state.stopped) return "Replies: paused"
+  if (state.stopped) return "Replies: at cap"
   var n = 0
   var q = state.queue || []
   for (var i = 0; i < q.length; i++) if (!q[i].done) n++
@@ -732,10 +799,15 @@ if (typeof module !== "undefined") {
     MAX_BODY_CHARS: MAX_BODY_CHARS,
     DEFAULT_COST_PER_POST: DEFAULT_COST_PER_POST,
     DEFAULT_MONTHLY_CAP_USD: DEFAULT_MONTHLY_CAP_USD,
+    COST_FLOOR: COST_FLOOR,
+    clampCost: clampCost,
+    readCeiling: readCeiling,
+    GRIPE_FLOOR: GRIPE_FLOOR,
     TRACKED_POSTS_MAX: TRACKED_POSTS_MAX,
     TRACKED_POST_MAX_AGE_DAYS: TRACKED_POST_MAX_AGE_DAYS,
     MAX_REPLIES_PER_POST: MAX_REPLIES_PER_POST,
     MAX_QUEUE: MAX_QUEUE,
+    DUP_THRESHOLD: DUP_THRESHOLD,
     BUCKETS: BUCKETS,
     SUBSTANCE_FLOOR: SUBSTANCE_FLOOR,
     clean: clean,

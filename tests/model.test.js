@@ -122,13 +122,30 @@ test("substanceScore floors '+1' chains and rewards specific reports", () => {
 
 // ---- dedupe ----
 
+test("the shipped default dedup threshold collapses the two crash reports", () => {
+  // Guards the shipped-vs-tested divergence: production calls collapseDuplicates
+  // with no threshold, so the DEFAULT must be the value that actually collapses
+  // the fixture's near-duplicate pair.
+  assert.equal(Model.DUP_THRESHOLD, 0.55)
+  const parsed = Model.parseTweetList(fixture("conversation.json"))
+  const replies = parsed.tweets
+    .filter((t) => t.authorId !== SELF)
+    .map((t) => ({ id: t.id, text: t.text, authorUsername: t.authorUsername,
+      metrics: t.metrics, bucket: Model.classifyReply(t.text) }))
+  Model.collapseDuplicates(replies) // no threshold: uses the shipped default
+  const crashers = replies.filter((r) => /crash/i.test(r.text))
+  assert.equal(crashers.filter((r) => r.isCanonical).length, 1, "default threshold collapses the pair")
+  // Every clustered member shares the canonical's group id.
+  assert.equal(crashers[0].groupId, crashers[1].groupId)
+})
+
 test("collapseDuplicates groups the two near-identical Wayland-crash reports", () => {
   const parsed = Model.parseTweetList(fixture("conversation.json"))
   const replies = parsed.tweets
     .filter((t) => t.authorId !== SELF)
     .map((t) => ({ id: t.id, text: t.text, authorUsername: t.authorUsername,
       metrics: t.metrics, bucket: Model.classifyReply(t.text) }))
-  Model.collapseDuplicates(replies, 0.55)
+  Model.collapseDuplicates(replies)
   const crashers = replies.filter((r) => /crash/i.test(r.text))
   assert.equal(crashers.length, 2)
   const canon = crashers.filter((r) => r.isCanonical)
@@ -162,7 +179,7 @@ function ingestFixture() {
       createdMs: t.createdMs, metrics: t.metrics,
       bucket: Model.classifyReply(t.text),
       substance: Model.substanceScore(t.text, t.metrics) }))
-  Model.collapseDuplicates(replies, 0.55)
+  Model.collapseDuplicates(replies)
   return replies
 }
 
@@ -175,6 +192,13 @@ test("bucketCounts and bucketChips summarize the reply mix", () => {
   assert.ok(counts.praise >= 1)
   assert.ok(counts.noise >= 2)
   assert.ok(Model.bucketChips(counts).indexOf("gripe") >= 0)
+})
+
+test("bucketChips pluralizes per count and leaves mass nouns invariant", () => {
+  assert.equal(Model.bucketChips({ gripe: 1, question: 1, feature_ask: 1, praise: 1, noise: 0 }),
+    "1 gripe · 1 question · 1 ask · 1 praise")
+  assert.equal(Model.bucketChips({ gripe: 4, question: 2, feature_ask: 1, praise: 0, noise: 0 }),
+    "4 gripes · 2 questions · 1 ask")
 })
 
 test("topQuotes returns verbatim canonical quotes, never a numeric score", () => {
@@ -209,6 +233,34 @@ test("needsReply excludes the author's own replies", () => {
   assert.equal(Model.needsReply(self, SELF), false)
 })
 
+test("a terse gripe clears the queue via the lower gripe floor", () => {
+  // "broken" scores at the gripe floor; a founder wants a two-word outage in
+  // the queue. A question at the same substance stays below the higher floor.
+  const griped = { authorId: "x", bucket: "gripe", substance: Model.GRIPE_FLOOR, isCanonical: true }
+  const asked = { authorId: "x", bucket: "feature_ask", substance: Model.GRIPE_FLOOR, isCanonical: true }
+  assert.equal(Model.needsReply(griped, SELF), true)
+  assert.equal(Model.needsReply(asked, SELF), false)
+  assert.ok(Model.GRIPE_FLOOR < Model.SUBSTANCE_FLOOR)
+})
+
+test("referenced_tweets exposes the replied-to parent for self-thread routing", () => {
+  const body = JSON.stringify({
+    data: [{ id: "2", text: "reply", created_at: "2026-08-20T10:00:00Z",
+      conversation_id: "1", author_id: "9",
+      referenced_tweets: [{ type: "replied_to", id: "1" }],
+      public_metrics: {} }],
+    meta: { result_count: 1, newest_id: "2" }
+  })
+  const parsed = Model.parseTweetList(body)
+  assert.equal(parsed.tweets[0].replyParentId, "1")
+  // No referenced_tweets -> empty, so routing falls back to conversation.
+  const noRef = Model.parseTweetList(JSON.stringify({
+    data: [{ id: "3", text: "t", created_at: "2026-08-20T10:00:00Z", conversation_id: "1", author_id: "9", public_metrics: {} }],
+    meta: { result_count: 1 }
+  }))
+  assert.equal(noRef.tweets[0].replyParentId, "")
+})
+
 // ---- spend meter ----
 
 test("chargeLedger accumulates within a month and resets across months", () => {
@@ -231,9 +283,25 @@ test("projectedMonthUsd extrapolates linearly on the month so far", () => {
 })
 
 test("budgetStopped is a hard stop at the cap", () => {
-  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 8.01 }, 8, NOW_MS), true)
-  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 5 }, 8, NOW_MS), false)
-  assert.equal(Model.budgetStopped({ month: "2026-07", dollars: 99 }, 8, NOW_MS), false)
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 8.01, posts: 0 }, 8, NOW_MS), true)
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 5, posts: 0 }, 8, NOW_MS), false)
+  assert.equal(Model.budgetStopped({ month: "2026-07", dollars: 99, posts: 0 }, 8, NOW_MS), false)
+})
+
+test("budgetStopped has a price-independent read ceiling a low cost cannot hide", () => {
+  // A near-zero costPerPost keeps dollars tiny, but the read count still trips
+  // the ceiling derived from the cap at the floor price.
+  const ceiling = Model.readCeiling(8)
+  assert.equal(ceiling, Math.ceil(8 / Model.COST_FLOOR))
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 0.01, posts: ceiling }, 8, NOW_MS), true)
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 0.01, posts: ceiling - 1 }, 8, NOW_MS), false)
+})
+
+test("clampCost floors an implausibly low per-post price", () => {
+  assert.equal(Model.clampCost(0.005), 0.005)
+  assert.equal(Model.clampCost(0.0000001), Model.DEFAULT_COST_PER_POST)
+  assert.equal(Model.clampCost(0), Model.DEFAULT_COST_PER_POST)
+  assert.equal(Model.clampCost("nonsense"), Model.DEFAULT_COST_PER_POST)
 })
 
 test("spendText and usd format money cleanly", () => {
@@ -248,7 +316,7 @@ test("spendText and usd format money cleanly", () => {
 
 test("pillText reflects setup, paused, count, and drained states", () => {
   assert.equal(Model.pillText({ valid: true, configured: false }), "X Files: setup")
-  assert.equal(Model.pillText({ valid: true, configured: true, stopped: true, queue: [] }), "Replies: paused")
+  assert.equal(Model.pillText({ valid: true, configured: true, stopped: true, queue: [] }), "Replies: at cap")
   assert.equal(Model.pillText({ valid: true, configured: true, stopped: false,
     queue: [{ done: false }, { done: false }, { done: true }] }), "Replies: 2")
   assert.equal(Model.pillText({ valid: true, configured: true, stopped: false,

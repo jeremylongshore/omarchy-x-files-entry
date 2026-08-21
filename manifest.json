@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "X Files",
-    "description": "The pill counts replies that need you and turns loud at the monthly spend cap. The panel is a drainable queue plus per-post digests: volume, velocity, bucket chips, and verbatim quotes. Connect with x-files-login; the widget never sees your token.",
+    "description": "The pill counts replies that need you and switches to an alert color at the monthly spend cap. The panel is a drainable queue plus per-post digests: volume, velocity, bucket chips, and verbatim quotes. Connect with x-files-login; the widget never sees your token.",
     "category": "Productivity",
     "aliases": [
       "x-files",
