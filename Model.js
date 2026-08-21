@@ -159,6 +159,37 @@ function conversationSearchUrl(conversationId, sinceId) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Summary endpoint policy.
+//
+// The README advertises Ollama at http://localhost:11434/v1 and LM Studio at
+// http://localhost:1234/v1, and states plainly that local http endpoints are
+// the one case exempt from the https-only rule. The code never implemented
+// that exemption: it tested /^https:\/\/\S+$/ and additionally passed
+// --proto =https to curl, so both advertised local runtimes were rejected
+// twice over. Reported by the marketplace reviewer on submission 1230.
+//
+// The exemption is deliberately narrow. http is allowed ONLY for loopback, so
+// a typo in a remote host cannot silently downgrade a request carrying an API
+// key to cleartext. Everything else must be https.
+//
+// Lives here, not in Service.qml, so the offline suite can reach it.
+function summaryEndpoint(base) {
+  var s = String(base || "").trim().replace(/\/+$/, "")
+  if (/^https:\/\/[^\s]+$/.test(s)) return { ok: true, proto: "https", url: s }
+
+  // The bracketed form must be matched explicitly: an IPv6 literal is full of
+  // colons, so a character class that excludes ':' can never match [::1].
+  var m = /^http:\/\/(\[[^\]]+\]|[^\/:?#]+)(?::\d+)?(?:[\/?#]|$)/i.exec(s)
+  if (m) {
+    var host = m[1].toLowerCase()
+    if (host === "localhost" || host === "127.0.0.1" || host === "[::1]") {
+      return { ok: true, proto: "http", url: s }
+    }
+  }
+  return { ok: false, proto: "", url: "" }
+}
+
 // ---- Rate limit plumbing (port of the triage server's header tracking).
 
 function parseRateHeaders(headerText) {
@@ -1049,6 +1080,7 @@ function nextFanoutPost(internal, alreadyFanned, cap) {
 
 if (typeof module !== "undefined") {
   module.exports = {
+    summaryEndpoint: summaryEndpoint,
     MAX_BODY_CHARS: MAX_BODY_CHARS,
     DEFAULT_COST_PER_POST: DEFAULT_COST_PER_POST,
     DEFAULT_MONTHLY_CAP_USD: DEFAULT_MONTHLY_CAP_USD,

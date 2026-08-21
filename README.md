@@ -95,6 +95,33 @@ Add **X Files** to your bar layout (Omarchy menu, Bar, or
 To disconnect: `x-files-login --forget`. State lives in
 `~/.local/state/omarchy/x-files/` and is safe to delete.
 
+## Removal
+
+Removing the plugin does not remove the three things installed alongside it,
+so remove them explicitly. Nothing here is left behind after these four steps.
+
+```bash
+# 1. Remove the widget from your bar layout first, through the Omarchy menu
+#    under Bar, or by deleting its entry from ~/.config/omarchy/shell.json.
+
+# 2. Forget the credential, which shreds ~/.local/state/omarchy/x-files/credentials.json
+x-files-login --forget
+
+# 3. Remove the plugin itself
+omarchy plugin remove io.github.jeremylongshore.x-files
+
+# 4. Remove the PATH symlink from the connect step and any remaining state
+rm -f ~/.local/bin/x-files-login
+rm -rf ~/.local/state/omarchy/x-files
+```
+
+Step 4 matters because the symlink in the connect step above is created by
+you, outside the plugin directory, so `omarchy plugin remove` does not know
+about it and will leave a dangling link on your PATH.
+
+Nothing is written anywhere else. The plugin never modifies
+`~/.config/omarchy/shell.json`; it only reads it.
+
 ## The panel
 
 Standard Omarchy panel keys:

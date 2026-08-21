@@ -415,3 +415,65 @@ test("BUCKETS and defaults are self-consistent", () => {
   assert.equal(Model.DEFAULT_COST_PER_POST, 0.005)
   assert.ok(Model.SUBSTANCE_FLOOR > 0 && Model.SUBSTANCE_FLOOR < 1)
 })
+
+// ---------------------------------------------------------------------------
+// Summary endpoint policy.
+//
+// Reported by the marketplace reviewer on submission 1230: the advertised
+// optional-summary flow rejected its own documented local HTTP endpoints. The
+// README sells Ollama at http://localhost:11434/v1 and LM Studio at
+// http://localhost:1234/v1 and promises local http is exempt from the
+// https-only rule, but the code tested /^https:\/\/\S+$/ and also passed
+// --proto =https to curl, so both were refused twice over.
+test("summaryEndpoint accepts the local runtimes the README advertises", () => {
+  for (const u of ["http://localhost:11434/v1", "http://localhost:1234/v1",
+                   "http://127.0.0.1:8080/v1", "http://[::1]:11434/v1"]) {
+    const r = Model.summaryEndpoint(u)
+    assert.equal(r.ok, true, u)
+    assert.equal(r.proto, "http", u)
+  }
+})
+
+test("summaryEndpoint keeps every remote endpoint on https", () => {
+  const r = Model.summaryEndpoint("https://api.groq.com/openai/v1")
+  assert.equal(r.ok, true)
+  assert.equal(r.proto, "https")
+})
+
+test("summaryEndpoint refuses cleartext to anything that is not loopback", () => {
+  // A typo in a remote host must never silently downgrade a request carrying
+  // an API key to cleartext, and a hostname that merely starts with the word
+  // localhost is not loopback.
+  for (const u of ["http://evil.com/v1", "http://192.168.1.5/v1",
+                   "http://localhost.evil.com/v1", "http://10.0.0.1/v1"]) {
+    assert.equal(Model.summaryEndpoint(u).ok, false, u)
+  }
+})
+
+test("summaryEndpoint refuses a non-http scheme and empty input", () => {
+  for (const u of ["ftp://x/v1", "file:///etc/passwd", "", null, undefined]) {
+    assert.equal(Model.summaryEndpoint(u).ok, false, String(u))
+  }
+})
+
+test("summaryEndpoint strips trailing slashes so the path joins cleanly", () => {
+  assert.equal(Model.summaryEndpoint("https://api.groq.com/openai/v1///").url,
+               "https://api.groq.com/openai/v1")
+})
+
+// The other half of the same report: a valid single-line JSON response with no
+// trailing newline was discarded. onApiResponse recovers the status code by
+// reading after the LAST newline, but the summary curl omitted -w "\n%{code}",
+// so such a body contained no newline at all, yielding code 0 and an EMPTY
+// body. It appeared to work only when the provider happened to end its
+// response with a newline. This pins the parse that the framing feeds.
+test("parseSummary reads a single-line JSON body with no trailing newline", () => {
+  const body = '{"choices":[{"message":{"content":"three people hit the same crash"}}]}'
+  assert.equal(body.endsWith("\n"), false)
+  assert.equal(Model.parseSummary(body), "three people hit the same crash")
+})
+
+test("parseSummary reads the same body when it does end with a newline", () => {
+  const body = '{"choices":[{"message":{"content":"same text"}}]}\n'
+  assert.equal(Model.parseSummary(body), "same text")
+})

@@ -213,7 +213,7 @@ Item {
   // only a post whose conversation actually grew is worth a completion.
 
   function startSummaries() {
-    var urlOk = /^https:\/\/\S+$/.test(root.aiBaseUrl)
+    var urlOk = Model.summaryEndpoint(root.aiBaseUrl).ok
     if (!urlOk || !root.aiModel || !root.aiApiKey) { root.finishPoll(); return }
     var digests = Model.buildDigests(root.internal, Date.now())
     var targets = []
@@ -234,12 +234,25 @@ Item {
     if (root.summaryIndex >= root.summaryTargets.length) { root.finishPoll(); return }
     var t = root.summaryTargets[root.summaryIndex]
     var body = Model.summaryRequestBody(root.aiModel, Model.summaryContext(t.digest))
-    var url = root.aiBaseUrl.replace(/\/+$/, "") + "/chat/completions"
+    var ep = Model.summaryEndpoint(root.aiBaseUrl)
+    if (!ep.ok) { root.finishPoll(); return }
+    var url = ep.url + "/chat/completions"
     root.phase = "summary"
-    // --proto =https and the -- terminator pin curl to an https POST at the
-    // configured base URL; the API key rides stdin, never argv.
-    apiProc.command = ["curl", "-fsS", "--proto", "=https",
+    // --proto pins curl to the single scheme this endpoint is allowed to use,
+    // and the -- terminator ends option parsing. ep.proto is "https" for every
+    // remote endpoint and "http" only for loopback, which is what lets the
+    // advertised local runtimes work without weakening anything remote. The
+    // API key rides stdin, never argv.
+    //
+    // -o - and -w are NOT optional here. onApiResponse recovers the status
+    // code by reading after the LAST newline, so every response must carry the
+    // "\n<code>" suffix. Without it a single-line JSON body with no trailing
+    // newline has no newline at all, so the parse yielded code 0 and an EMPTY
+    // body and the valid summary was silently discarded. It appeared to work
+    // only when the provider happened to end its response with a newline.
+    apiProc.command = ["curl", "-sS", "--proto", "=" + ep.proto,
       "--max-time", "30", "--max-filesize", "1000000",
+      "-o", "-", "-w", "\n%{http_code}",
       "-H", "Content-Type: application/json",
       "--header", "@-",
       "-d", body, "--", url]
