@@ -140,7 +140,7 @@ rides curl's stdin, never an argv.
 
 ## Honest boundary
 
-The QML layer is proven by the rig render, the data layer by 31 offline
+The QML layer is proven by the rig render, the data layer by 40 offline
 tests. The live X API leg (auth, since_id billing, real reply capture) is
 verified against the published docs but not yet exercised against a live
 account with credits; that is the next step, and it is what will confirm the

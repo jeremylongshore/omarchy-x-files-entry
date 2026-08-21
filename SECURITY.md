@@ -34,7 +34,8 @@ and a hostile reply must never fetch, execute, or mis-render inside the shell.
 
 The plugin has no external runtime: no node, no python. The only shell script
 it ships is the one-time login; everything else runs inside Quickshell, using
-the `curl` and `jq` a stock Omarchy install already has. All I/O lives in one
+the `curl` and `jq` a stock Omarchy install already has (`omarchy plugin add`
+itself calls `jq`, so a box that can install this plugin has it). All I/O lives in one
 small bash script and one QML file:
 
 - **Fetch**: `curl -sS --proto =https --max-time 20 --max-filesize 2000000`

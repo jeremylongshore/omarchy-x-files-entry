@@ -1,8 +1,11 @@
 // X Files data layer: pure parse/classify/score/merge functions over
-// X API v2 responses plus the on-disk state record the poller CLI writes.
-// No QML and no network access here. The same file loads in Quickshell (via
-// `import "Model.js" as Model`), in node for the unit suite, and in the two
-// CLIs (bin/x-files-login, bin/x-files-poll) via require.
+// X API v2 responses plus the on-disk state record Service.qml writes.
+// No QML and no network access here, so the same file loads unchanged in
+// Quickshell (via `import "Model.js" as Model`, which is where it actually
+// runs in production) and in node for the offline unit suite. There is NO
+// node runtime on a stock Omarchy install, so every line here must stay
+// ES5-compatible plain JS that the QML engine accepts: no require(), no
+// template literals, no arrow functions.
 //
 // Lineage: the classification indicator tables, the hybrid trigram+token
 // dedupe, the reporter substance scoring, and the PII redaction are ports of
@@ -736,7 +739,7 @@ function parseSummary(raw) {
   return clean(content, 600)
 }
 
-// ---- State record. One writer (the poller CLI), atomic tmp+mv; the panel
+// ---- State record. One writer (the QML service, through FileView); the panel
 //      only ever reads.
 
 function emptyState() {
@@ -827,7 +830,8 @@ function parseState(raw) {
 }
 
 
-// ---- Store management. These were the poller CLI's internals; they live here
+// ---- Store management. These were the poller CLI's internals before the
+//      node-free rewrite; they live here
 //      now so the same pure code runs in Quickshell and in the offline suite.
 //      "internal" is the working set: { ownPosts, replies{postId:[]},
 //      mentionReplies[], doneIds{}, notifiedIds{}, summaries{}, ledger, ... }.

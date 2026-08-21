@@ -167,7 +167,9 @@ BarWidget.qml + Panel.qml (render + keys)
 **No Node.js, no Python, no external runtime.** A stock Omarchy install has no
 node on the graphical session PATH (Omarchy installs it through mise, whose
 shims are not exported to the session), so this plugin depends on nothing but
-Quickshell, `curl`, and `jq` for the one-time login. That is the same pattern
+Quickshell, `curl`, and `jq` for the one-time login. Those two are safe to
+assume: Omarchy's own commands use them, and `omarchy plugin add` itself calls
+`jq`, so if it were missing you could not install a plugin at all. That is the same pattern
 the marketplace-validated MLB Booth and Pit Wall widgets use.
 
 The bearer token rides curl's stdin (`--header @-`) in both the login script
@@ -186,7 +188,7 @@ Network hosts: `api.x.com` (GET only), plus your own BYOK completion endpoint
 npm test
 ```
 
-31 tests over the pure data layer: the X API v2 parsers, lane classification,
+40 tests over the pure data layer: the X API v2 parsers, lane classification,
 substance scoring, hybrid dedupe, PII redaction, digest building, the
 needs-reply gate, the spend ledger and projection, and the state record.
 Offline against synthesized v2 fixtures; the live-capture procedure is in
