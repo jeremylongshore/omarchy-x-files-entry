@@ -29,6 +29,7 @@
       "notifications": "On",
       "monthlyCapUsd": 8,
       "costPerPost": 0.005,
+      "spendMeter": "Compact",
       "aiBaseUrl": "",
       "aiModel": "",
       "aiApiKey": ""
@@ -58,6 +59,14 @@
         "label": "Cost per post read (US dollars)",
         "defaultValue": "0.005",
         "description": "The X API post-read rate. Adjust down if your account bills owned reads cheaper; the spend meter uses this to charge every returned post."
+      },
+      {
+        "key": "spendMeter",
+        "type": "enum",
+        "label": "Spend meter display",
+        "options": ["Compact", "Full", "On alert", "Off"],
+        "defaultValue": "Compact",
+        "description": "How loudly the API spend shows. Compact: a small fill bar, no dollar figure. Full: the exact amount and projection. On alert: hidden until you near the cap. Off: never shown. The hard-stop cap and its banner work in every mode; the exact amount is always on the pill tooltip."
       }
     ]
   }

@@ -304,6 +304,34 @@ test("clampCost floors an implausibly low per-post price", () => {
   assert.equal(Model.clampCost("nonsense"), Model.DEFAULT_COST_PER_POST)
 })
 
+test("spend-meter display modes gate the exact figure but never the cap", () => {
+  const near = { month: "2026-08", posts: 0, dollars: 6.8 } // 85% of an 8 cap
+  const low = { month: "2026-08", posts: 0, dollars: 1.0 }
+  // Full always shows the line; Off/Compact never do; On alert only near cap.
+  assert.equal(Model.showSpendLine("Full", low, 8, NOW_MS), true)
+  assert.equal(Model.showSpendLine("Off", near, 8, NOW_MS), false)
+  assert.equal(Model.showSpendLine("Compact", near, 8, NOW_MS), false)
+  assert.equal(Model.showSpendLine("On alert", low, 8, NOW_MS), false)
+  assert.equal(Model.showSpendLine("On alert", near, 8, NOW_MS), true)
+  // spendMode normalizes unknown values to the calm default.
+  assert.equal(Model.spendMode("Full"), "Full")
+  assert.equal(Model.spendMode("nonsense"), "Compact")
+  assert.equal(Model.spendMode(undefined), "Compact")
+})
+
+test("spendFraction is a clamped 0..1 of the cap", () => {
+  assert.equal(Model.spendFraction({ month: "2026-08", dollars: 4 }, 8, NOW_MS), 0.5)
+  assert.equal(Model.spendFraction({ month: "2026-08", dollars: 20 }, 8, NOW_MS), 1)
+  assert.equal(Model.spendFraction({ month: "2026-07", dollars: 4 }, 8, NOW_MS), 0)
+  assert.equal(Model.spendFraction(null, 8, NOW_MS), 0)
+})
+
+test("parseState carries a validated spendMeter mode", () => {
+  assert.equal(Model.parseState(JSON.stringify({ configured: true, spendMeter: "Full", queue: [], posts: [] })).spendMeter, "Full")
+  assert.equal(Model.parseState(JSON.stringify({ configured: true, spendMeter: "bogus", queue: [], posts: [] })).spendMeter, "Compact")
+  assert.equal(Model.parseState(JSON.stringify({ configured: true, queue: [], posts: [] })).spendMeter, "Compact")
+})
+
 test("spendText and usd format money cleanly", () => {
   assert.equal(Model.usd(1.5), "$1.50")
   assert.equal(Model.usd(0), "$0.00")

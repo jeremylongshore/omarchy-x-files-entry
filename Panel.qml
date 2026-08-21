@@ -342,15 +342,53 @@ Panel {
                 font.letterSpacing: 1
               }
 
-              // Spend meter: always visible while configured.
+              // Spend meter, display controlled by the spendMeter setting. The
+              // exact figure shows in Full mode (and On-alert near the cap); a
+              // calm fill bar shows in Compact; nothing shows in Off. The exact
+              // amount is always on the pill tooltip regardless.
+              readonly property string spendMode: root.feedState.spendMeter
+              readonly property real spendFrac:
+                Model.spendFraction(root.feedState.ledger, root.feedState.capUsd, root.nowMs)
+              readonly property bool spendNear:
+                Model.spendNearCap(root.feedState.ledger, root.feedState.capUsd, root.nowMs)
+
               Text {
                 visible: root.feedState.configured
+                  && Model.showSpendLine(heroCol.spendMode, root.feedState.ledger, root.feedState.capUsd, root.nowMs)
                 text: Model.spendText(root.feedState.ledger, root.nowMs)
                   + " · cap " + Model.usd(root.feedState.capUsd)
                 textFormat: Text.PlainText
                 color: root.bar ? root.bar.foreground : Color.foreground
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.bodySmall
+              }
+
+              // Compact mode: a slim fill bar, no dollar figure to stare at. It
+              // tints toward the alert color as spend nears the cap.
+              Item {
+                visible: root.feedState.configured && heroCol.spendMode === "Compact"
+                width: parent.width
+                height: Style.space(8)
+
+                Rectangle {
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: parent.width
+                  height: Style.space(5)
+                  radius: height / 2
+                  color: root.bar ? Qt.darker(root.bar.foreground, 2.2) : Color.muted
+                  opacity: 0.35
+
+                  Rectangle {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Math.max(0, Math.min(1, heroCol.spendFrac)) * parent.width
+                    height: parent.height
+                    radius: height / 2
+                    color: heroCol.spendNear
+                      ? (root.bar ? root.bar.urgent : Color.urgent)
+                      : (root.bar ? root.bar.foreground : Color.foreground)
+                  }
+                }
               }
             }
           }

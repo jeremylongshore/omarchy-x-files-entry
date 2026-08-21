@@ -602,6 +602,36 @@ function spendText(ledger, nowMs) {
   return usd(spent) + " this month, ~" + usd(projectedMonthUsd(ledger, nowMs)) + " projected"
 }
 
+// ---- Spend-meter DISPLAY. The meter's job is a calm glance, not a running
+//      count of money to fret over, so how loudly it shows is a setting. The
+//      hard-stop cap is unaffected by any of this: enforcement is not display.
+var SPEND_MODES = ["Compact", "Full", "On alert", "Off"]
+// Compact and On-alert start warning at this fraction of the cap.
+var SPEND_ALERT_FRACTION = 0.8
+
+function spendMode(value) {
+  return SPEND_MODES.indexOf(String(value)) >= 0 ? String(value) : "Compact"
+}
+
+// 0..1 fraction of the monthly cap spent, for the compact fill bar.
+function spendFraction(ledger, capUsd, nowMs) {
+  if (!ledger || ledger.month !== monthKey(nowMs) || num(capUsd) <= 0) return 0
+  var f = num(ledger.dollars) / num(capUsd)
+  return f < 0 ? 0 : (f > 1 ? 1 : f)
+}
+
+function spendNearCap(ledger, capUsd, nowMs) {
+  return spendFraction(ledger, capUsd, nowMs) >= SPEND_ALERT_FRACTION
+}
+
+// Whether the exact spend line should render for a given mode. The bar (compact
+// mode) and the banner (hard stop) are decided separately in the panel.
+function showSpendLine(mode, ledger, capUsd, nowMs) {
+  if (mode === "Full") return true
+  if (mode === "On alert") return spendNearCap(ledger, capUsd, nowMs)
+  return false // Compact shows a bar, Off shows nothing
+}
+
 // Two hard stops, whichever trips first: the dollar cap, and a
 // price-independent post-read ceiling derived from the cap at the floor
 // price. The second stop is what makes a too-low costPerPost unable to hide
@@ -715,6 +745,7 @@ function emptyState() {
     account: { username: "", last4: "" },
     ledger: { month: "", posts: 0, dollars: 0 },
     capUsd: DEFAULT_MONTHLY_CAP_USD,
+    spendMeter: "Compact",
     queue: [], posts: [], lastError: ""
   }
 }
@@ -731,6 +762,7 @@ function parseState(raw) {
   out.stopped = data.stopped === true
   out.generatedAt = num(data.generatedAt)
   out.capUsd = num(data.capUsd) || DEFAULT_MONTHLY_CAP_USD
+  out.spendMeter = spendMode(data.spendMeter)
   out.lastError = clean(data.lastError, 100)
   if (data.account) {
     out.account.username = clean(data.account.username, 20)
@@ -837,6 +869,12 @@ if (typeof module !== "undefined") {
     projectedMonthUsd: projectedMonthUsd,
     usd: usd,
     spendText: spendText,
+    SPEND_MODES: SPEND_MODES,
+    SPEND_ALERT_FRACTION: SPEND_ALERT_FRACTION,
+    spendMode: spendMode,
+    spendFraction: spendFraction,
+    spendNearCap: spendNearCap,
+    showSpendLine: showSpendLine,
     budgetStopped: budgetStopped,
     pillText: pillText,
     tooltipText: tooltipText,

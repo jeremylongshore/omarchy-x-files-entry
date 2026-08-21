@@ -30,11 +30,16 @@ answer.
   bucket chips (`4 gripes · 2 questions · 1 ask`), and two verbatim quotes
   from the loudest buckets. Buckets and quotes, never a numeric sentiment
   score.
-- **A live spend meter.** X API reads are pay-per-use, so X Files keeps
-  a running monthly ledger and shows it: `$1.83 this month, ~$2.84
-  projected · cap $8.00`. The cap is a hard stop, not a warning, and a
-  second price-independent read-count ceiling backs it up so a mis-set
-  rate can never hide runaway spend.
+- **A live spend meter, as loud or as quiet as you want.** X API reads are
+  pay-per-use, so X Files keeps a running monthly ledger. Nobody wants to
+  stare at a dollar figure all day, so how it shows is a setting: **Compact**
+  (default) is a small fill bar that tints amber near the cap, no number;
+  **Full** shows `$1.83 this month, ~$2.84 projected · cap $8.00`; **On
+  alert** stays hidden until you near the cap; **Off** never shows it. The
+  exact figure is always one hover away on the pill tooltip, and the hard
+  stop works in every mode: the cap is not a warning, and a second
+  price-independent read-count ceiling backs it up so a mis-set rate can
+  never hide runaway spend.
 
 ## The cost story
 

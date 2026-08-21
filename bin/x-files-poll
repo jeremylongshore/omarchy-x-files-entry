@@ -72,6 +72,7 @@ function readSettings() {
     notifications: "On",
     monthlyCapUsd: Model.DEFAULT_MONTHLY_CAP_USD,
     costPerPost: Model.DEFAULT_COST_PER_POST,
+    spendMeter: "Compact",
     aiBaseUrl: "", aiModel: "", aiApiKey: ""
   }
   var conf = readJson(SHELL_CONFIG, null)
@@ -90,6 +91,7 @@ function readSettings() {
         // ~$0 while X bills for real. The floor plus the read-count ceiling in
         // budgetStopped make the number of reads bounded regardless of price.
         costPerPost: Model.clampCost(e.costPerPost),
+        spendMeter: Model.spendMode(e.spendMeter),
         aiBaseUrl: typeof e.aiBaseUrl === "string" ? e.aiBaseUrl : "",
         aiModel: typeof e.aiModel === "string" ? e.aiModel : "",
         aiApiKey: typeof e.aiApiKey === "string" ? e.aiApiKey : ""
@@ -206,6 +208,7 @@ function poll(opts) {
       configured: !!creds,
       stopped: Model.budgetStopped(internal.ledger, settings.monthlyCapUsd, nowMs),
       capUsd: settings.monthlyCapUsd,
+      spendMeter: settings.spendMeter,
       account: creds
         ? { username: creds.username, last4: String(creds.bearerToken || "").slice(-4) }
         : { username: "", last4: "" },
