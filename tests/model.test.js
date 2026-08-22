@@ -477,3 +477,18 @@ test("parseSummary reads the same body when it does end with a newline", () => {
   const body = '{"choices":[{"message":{"content":"same text"}}]}\n'
   assert.equal(Model.parseSummary(body), "same text")
 })
+
+// ---------------------------------------------------------------- lane colour
+
+test("laneHue gives each reply lane its own hue and leaves noise colourless", () => {
+  // The classifier already knows what kind of reply this is, so the lane is
+  // carried by colour and the queue can be triaged without reading every row.
+  // Noise returns a negative sentinel on purpose: it is the lane you skip, so
+  // it must never compete for attention.
+  const hues = ["praise", "gripe", "question", "feature_ask"].map((b) => Model.laneHue(b))
+  for (const h of hues) assert.ok(h >= 0 && h <= 1)
+  assert.equal(new Set(hues).size, hues.length, "two lanes share a hue")
+  for (const b of ["noise", "", null, undefined, "unknown"]) {
+    assert.ok(Model.laneHue(b) < 0, String(b))
+  }
+})

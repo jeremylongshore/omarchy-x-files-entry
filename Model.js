@@ -1078,8 +1078,27 @@ function nextFanoutPost(internal, alreadyFanned, cap) {
   return null
 }
 
+// A reply queue rendered in one grey makes you read every row to find out what
+// kind of thing it is, when the classifier already knows. The lane is the most
+// useful fact about a reply and it can be carried by colour for free.
+//
+// Green praise, red gripe, blue question, amber feature ask, and noise left
+// deliberately colourless because it is the lane you are meant to skip.
+//
+// Only the HUE is fixed here; saturation and lightness are set at the call site
+// so the lanes inherit the user's theme rather than importing a palette.
+function laneHue(bucket) {
+  var b = String(bucket || "").toLowerCase()
+  if (b === "praise") return 0.33
+  if (b === "gripe") return 0.005
+  if (b === "question") return 0.58
+  if (b === "feature_ask") return 0.11
+  return -1   // noise: caller renders it unsaturated
+}
+
 if (typeof module !== "undefined") {
   module.exports = {
+    laneHue: laneHue,
     summaryEndpoint: summaryEndpoint,
     MAX_BODY_CHARS: MAX_BODY_CHARS,
     DEFAULT_COST_PER_POST: DEFAULT_COST_PER_POST,

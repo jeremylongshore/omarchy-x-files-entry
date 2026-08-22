@@ -408,6 +408,17 @@ Panel {
                   opacity: 0.12
                 }
 
+                Rectangle {
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(8)
+                  anchors.verticalCenter: parent.verticalCenter
+                  width: Style.space(2)
+                  height: qCol.implicitHeight
+                  radius: width / 2
+                  visible: Model.laneHue(qItem.modelData.bucket) >= 0
+                  color: Qt.hsla(Model.laneHue(qItem.modelData.bucket), 0.55, 0.58, 0.9)
+                }
+
                 MouseArea {
                   anchors.fill: parent
                   acceptedButtons: Qt.LeftButton | Qt.RightButton
@@ -447,7 +458,13 @@ Panel {
                       textFormat: Text.PlainText
                       width: Math.min(implicitWidth, qCol.width * 0.3)
                       elide: Text.ElideRight
-                      color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
+                      // The classifier already knows what kind of reply this is,
+                      // so the lane carries its own colour and you can triage the
+                      // queue without reading every row. Noise returns -1 and
+                      // stays unsaturated on purpose: it is the lane you skip.
+                      color: Model.laneHue(qItem.modelData.bucket) < 0
+                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.6) : Color.muted)
+                        : Qt.hsla(Model.laneHue(qItem.modelData.bucket), 0.55, 0.62, 1.0)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
                     }
@@ -552,13 +569,19 @@ Panel {
                   Repeater {
                     model: modelData.quotes
 
+                    // Each quote carries the bucket it was picked from, so the
+                    // same lane colour applies here as in the queue: a reader
+                    // sees whether a verbatim line is praise or a gripe before
+                    // reading a word of it.
                     Text {
                       required property var modelData
                       width: dCol.width
                       text: "“" + modelData.text + "”  @" + modelData.username
                       textFormat: Text.PlainText
                       wrapMode: Text.WordWrap
-                      color: root.bar ? Qt.darker(root.bar.foreground, 1.25) : Color.muted
+                      color: Model.laneHue(modelData.bucket) < 0
+                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.25) : Color.muted)
+                        : Qt.hsla(Model.laneHue(modelData.bucket), 0.42, 0.66, 1.0)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.bodySmall
                       font.italic: true
