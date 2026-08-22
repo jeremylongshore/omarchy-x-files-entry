@@ -6,6 +6,8 @@ Entries are derived from this repository's commit history, so every line
 corresponds to a real change. The format follows Keep a Changelog and the
 project uses Semantic Versioning.
 
+Regenerate with `scripts/gen-changelog.sh`.
+
 ## [Unreleased]
 
 Nothing yet.
@@ -41,3 +43,5 @@ Tooling and repository changes with no effect on the shipped plugin.
 - Re-sync the vendored lane and add an advisory freshness check
 - Vendor c40, the panel design gate, and repair the sync that dropped it
 - Vendor rig-render, which loads the plugin into a real shell
+- Add four-lane MiniMax review and backfill the changelog
+
