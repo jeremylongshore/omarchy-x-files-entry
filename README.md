@@ -20,6 +20,8 @@ sentiment, and never reads your whole timeline. It reads the replies to
 *your* posts, buckets them, and hands you the ones that actually need an
 answer.
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/U5S225PTME)
+
 ## What it does
 
 - **A drainable queue**, not a feed. Questions, gripes, and feature asks with
