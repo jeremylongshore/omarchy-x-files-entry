@@ -5,7 +5,7 @@
   "version": "1.0.0",
   "author": "Jeremy Longshore",
   "license": "MIT",
-  "description": "Reads the replies to your own X posts and tells you what they said: classified digests, representative quotes, and a drainable needs-your-reply queue, for a few dollars a month of API credits with an always-visible spend meter.",
+  "description": "X Files turns replies to your X posts into a drainable Omarchy queue, not another feed. The bar shows work and API spend; open the panel to group questions, gripes, and asks, keep quotes and inspect digests with volume, velocity, and bucket counts. A hard monthly cap stops new X API reads. It reads only your posts, mentions, and reply conversations; never posts, DMs, reads your timeline, or scores sentiment. Credentials stay in a private 0600 file; PII-redacted BYOK summaries are off by default.",
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "X Files",
-    "description": "The pill counts replies that need you and switches to an alert color at the monthly spend cap. The panel is a drainable queue plus per-post digests: volume, velocity, bucket chips, and verbatim quotes. Connect with x-files-login; the widget never sees your token.",
+    "description": "X Files turns replies to your X posts into a drainable Omarchy queue, not another feed. The bar shows work and API spend; open the panel to group questions, gripes, and asks, keep quotes and inspect digests with volume, velocity, and bucket counts. A hard monthly cap stops new X API reads. It reads only your posts, mentions, and reply conversations; never posts, DMs, reads your timeline, or scores sentiment. Credentials stay in a private 0600 file; PII-redacted BYOK summaries are off by default.",
     "category": "Productivity",
     "aliases": [
       "x-files",
