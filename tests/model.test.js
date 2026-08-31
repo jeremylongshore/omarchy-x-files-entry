@@ -492,3 +492,330 @@ test("laneHue gives each reply lane its own hue and leaves noise colourless", ()
     assert.ok(Model.laneHue(b) < 0, String(b))
   }
 })
+
+// -------------------------------------------------------- store management
+
+function reply(over = {}) {
+  return Object.assign({
+    id: "r1", text: "How does this work?", authorId: "other",
+    authorUsername: "reader", conversationId: "c1", replyParentId: "p1",
+    createdMs: NOW_MS - 60000, metrics: { likes: 2, replies: 0, retweets: 0, quotes: 0 },
+    bucket: "question", substance: 0.9, isCanonical: true, groupId: "g1", dupCount: 0
+  }, over)
+}
+
+function ownPost(over = {}) {
+  return Object.assign({
+    id: "p1", text: "Shipping X Files", createdMs: NOW_MS - 3600000,
+    conversationId: "c1", metrics: { replies: 1 }
+  }, over)
+}
+
+test("user lookup URL encodes the handle and requests identity fields", () => {
+  const url = Model.userByUsernameUrl("name with space")
+  assert.match(url, /users\/by\/username\/name%20with%20space/)
+  assert.match(url, /user.fields=username%2Cname/)
+})
+
+test("velocity, age, summary key, and tooltip helpers cover their display boundaries", () => {
+  assert.equal(Model.velocityPerHour([], NOW_MS), 0)
+  assert.ok(Model.velocityPerHour([reply({ createdMs: NOW_MS - 30 * 60000 })], NOW_MS) > 0)
+  assert.equal(Model.ageText(0, NOW_MS), "")
+  assert.equal(Model.ageText(NOW_MS - 1000, NOW_MS), "just now")
+  assert.equal(Model.ageText(NOW_MS - 5 * 60000, NOW_MS), "5m ago")
+  assert.equal(Model.ageText(NOW_MS - 2 * 3600000, NOW_MS), "2h ago")
+  assert.equal(Model.ageText(NOW_MS - 3 * 86400000, NOW_MS), "3d ago")
+  assert.equal(Model.summaryCacheKey("p1", 7), "p1:7")
+
+  const state = { valid: true, configured: true, stopped: false,
+    queue: [reply({ done: false })], ledger: { month: "2026-08", posts: 1, dollars: 0.005 } }
+  assert.equal(Model.tooltipText(null, NOW_MS), "X Files · loading")
+  assert.equal(Model.tooltipText({ valid: true, configured: false }, NOW_MS),
+    "X Files · run x-files-login to connect your X account")
+  assert.equal(Model.tooltipText(state, NOW_MS),
+    "X Files · 1 reply needs you · $0.01 this month, ~$0.01 projected")
+  assert.equal(Model.tooltipText(Object.assign({}, state, { stopped: true }), NOW_MS),
+    "X Files · 1 reply needs you · PAUSED at the monthly spend cap · $0.01 this month, ~$0.01 projected")
+  assert.equal(Model.tooltipText(Object.assign({}, state, { queue: [] }), NOW_MS),
+    "X Files · queue drained · $0.01 this month, ~$0.01 projected")
+})
+
+test("emptyInternal and maxId preserve bounded poll-state invariants", () => {
+  assert.deepEqual(Model.emptyInternal(), {
+    firstRun: true, sinceTweets: "", sinceMentions: "", perConv: {},
+    ownPosts: [], replies: {}, mentionReplies: [], doneIds: {}, notifiedIds: {},
+    summaries: {}, ledger: { month: "", posts: 0, dollars: 0 }
+  })
+  assert.equal(Model.maxId("", "9"), "9")
+  assert.equal(Model.maxId("10", ""), "10")
+  assert.equal(Model.maxId("9", "10"), "10")
+  assert.equal(Model.maxId("19", "20"), "20")
+  assert.equal(Model.maxId("20", "19"), "20")
+})
+
+test("classifyIngest drops self replies and computes lane plus substance", () => {
+  const tweets = [
+    reply({ id: "self", authorId: SELF, text: "How?" }),
+    reply({ id: "other", authorId: "9", text: "The panel is broken and crashes every time." })
+  ]
+  const out = Model.classifyIngest(tweets, SELF)
+  assert.equal(out.length, 1)
+  assert.equal(out[0].id, "other")
+  assert.equal(out[0].bucket, "gripe")
+  assert.ok(out[0].substance >= Model.GRIPE_FLOOR)
+})
+
+test("ingestReplies routes by parent, conversation, or mentions and ignores duplicates", () => {
+  const internal = Model.emptyInternal()
+  internal.ownPosts = [ownPost(), ownPost({ id: "p2", conversationId: "c2" })]
+  const parent = reply({ id: "r-parent", replyParentId: "p2", conversationId: "c1" })
+  const conversation = reply({ id: "r-conv", replyParentId: "missing", conversationId: "c1" })
+  const mention = reply({ id: "r-mention", replyParentId: "", conversationId: "elsewhere" })
+  Model.ingestReplies(internal, [parent, conversation, mention, mention], SELF)
+  assert.deepEqual(internal.replies.p2.map(r => r.id), ["r-parent"])
+  assert.deepEqual(internal.replies.p1.map(r => r.id), ["r-conv"])
+  assert.deepEqual(internal.mentionReplies.map(r => r.id), ["r-mention"])
+  assert.equal(Model.allReplies(internal).length, 3)
+})
+
+test("evictOne prefers done, then non-actionable, then the oldest queue-worthy item", () => {
+  const internal = Model.emptyInternal()
+  const done = reply({ id: "done" })
+  const noise = reply({ id: "noise", bucket: "noise", substance: 0 })
+  const needed = reply({ id: "needed" })
+  internal.doneIds.done = true
+  const first = [needed, done, noise]
+  Model.evictOne(first, internal, SELF)
+  assert.deepEqual(first.map(r => r.id), ["needed", "noise"])
+
+  const second = [needed, noise]
+  Model.evictOne(second, Model.emptyInternal(), SELF)
+  assert.deepEqual(second.map(r => r.id), ["needed"])
+
+  const third = [reply({ id: "a" }), reply({ id: "b" })]
+  Model.evictOne(third, Model.emptyInternal(), SELF)
+  assert.deepEqual(third.map(r => r.id), ["b"])
+})
+
+test("buildQueue drains done duplicate groups, filters noise, and sorts newest first", () => {
+  const internal = Model.emptyInternal()
+  internal.replies.p1 = [
+    reply({ id: "done", groupId: "handled", createdMs: 1 }),
+    reply({ id: "same-group", groupId: "handled", createdMs: 5 }),
+    reply({ id: "2", groupId: "old", createdMs: 2 }),
+    reply({ id: "4", groupId: "new", createdMs: 4, bucket: "feature_ask" }),
+    reply({ id: "noise", groupId: "noise", createdMs: 6, bucket: "noise", substance: 0 })
+  ]
+  internal.doneIds.done = true
+  const queue = Model.buildQueue(internal, SELF)
+  assert.deepEqual(queue.map(r => r.id), ["4", "2"])
+  assert.equal(queue[0].url, "https://x.com/reader/status/4")
+  assert.equal(queue[0].done, false)
+})
+
+test("buildDigests combines reply truth, unread state, quotes, velocity, and cached summary", () => {
+  const internal = Model.emptyInternal()
+  internal.ownPosts = [
+    ownPost(),
+    ownPost({ id: "empty", conversationId: "empty", metrics: { replies: 0 } })
+  ]
+  internal.replies.p1 = [
+    reply({ id: "r1", createdMs: NOW_MS - 10 * 60000 }),
+    reply({ id: "r2", createdMs: NOW_MS - 20 * 60000, bucket: "gripe", groupId: "g2" })
+  ]
+  internal.doneIds.r1 = true
+  internal.notifiedIds.r2 = true
+  internal.summaries[Model.summaryCacheKey("p1", 2)] = "Two useful replies."
+  const digests = Model.buildDigests(internal, NOW_MS)
+  assert.equal(digests.length, 1)
+  assert.equal(digests[0].postId, "p1")
+  assert.equal(digests[0].totalReplies, 2)
+  assert.equal(digests[0].newReplies, 0)
+  assert.ok(digests[0].velocity > 0)
+  assert.equal(digests[0].summary, "Two useful replies.")
+  assert.ok(digests[0].quotes.length > 0)
+})
+
+test("absorbOwnPosts deduplicates, ages out, caps, and prunes orphaned stores", () => {
+  const internal = Model.emptyInternal()
+  const old = ownPost({ id: "old", conversationId: "old-c", createdMs: NOW_MS - 8 * 86400000 })
+  internal.ownPosts = [old, ownPost()]
+  internal.replies.old = [reply({ id: "old-r" })]
+  internal.replies.orphan = [reply({ id: "orphan-r" })]
+  internal.perConv["old-c"] = "1"
+  internal.perConv.orphan = "2"
+  const incoming = [ownPost({ text: "newer duplicate", createdMs: NOW_MS })]
+  Model.absorbOwnPosts(internal, incoming, NOW_MS)
+  assert.deepEqual(internal.ownPosts.map(p => p.id), ["p1"])
+  assert.equal(internal.ownPosts[0].text, "newer duplicate")
+  assert.equal(internal.replies.old, undefined)
+  assert.equal(internal.replies.orphan, undefined)
+  assert.equal(internal.perConv["old-c"], undefined)
+  assert.equal(internal.perConv.orphan, undefined)
+})
+
+test("absorbOwnPosts enforces the tracked-post cap", () => {
+  const internal = Model.emptyInternal()
+  const posts = []
+  for (let i = 0; i < Model.TRACKED_POSTS_MAX + 3; i++) {
+    posts.push(ownPost({ id: `p${i}`, conversationId: `c${i}`, createdMs: NOW_MS - i }))
+  }
+  Model.absorbOwnPosts(internal, posts, NOW_MS)
+  assert.equal(internal.ownPosts.length, Model.TRACKED_POSTS_MAX)
+  assert.equal(internal.ownPosts[0].id, "p0")
+})
+
+test("nextFanoutPost respects cap and selects only conversations with missing replies", () => {
+  const internal = Model.emptyInternal()
+  internal.ownPosts = [
+    ownPost({ id: "full", metrics: { replies: 1 } }),
+    ownPost({ id: "owed", conversationId: "c2", metrics: { replies: 2 } })
+  ]
+  internal.replies.full = [reply({ id: "have" })]
+  internal.replies.owed = [reply({ id: "one" })]
+  assert.equal(Model.nextFanoutPost(internal, 0, 2).id, "owed")
+  assert.equal(Model.nextFanoutPost(internal, 2, 2), null)
+  internal.replies.owed.push(reply({ id: "two" }))
+  assert.equal(Model.nextFanoutPost(internal, 0, 2), null)
+})
+
+// ---------------------------------------------------------- defensive edges
+
+test("URL builders handle absent ids and omit empty query fields", () => {
+  assert.equal(Model.threadUrl("user", ""), "")
+  assert.match(Model.userByUsernameUrl(null), /users\/by\/username\//)
+  assert.match(Model.userTweetsUrl(null, null), /users\/\/tweets/)
+  assert.doesNotMatch(Model.mentionsUrl(null, null), /since_id/)
+  assert.match(Model.conversationSearchUrl(null, null), /conversation_id%3A/)
+})
+
+test("rate and response parsers keep sparse inputs inert", () => {
+  assert.deepEqual(Model.parseRateHeaders(null), { limit: 0, remaining: -1, resetAt: 0 })
+  assert.deepEqual(Model.parseRateHeaders("x-other: 1\nx-rate-limit-limit: 5"),
+    { limit: 5, remaining: -1, resetAt: 0 })
+  assert.equal(Model.parseUserLookup("x".repeat(Model.MAX_BODY_CHARS + 1)), null)
+  assert.equal(Model.parseUserLookup(JSON.stringify({ data: {} })), null)
+})
+
+test("tweet parser handles single, sparse, and rejected records safely", () => {
+  const body = JSON.stringify({
+    data: { id: "1", text: "hello", created_at: "bad", author_id: "missing", public_metrics: null },
+    includes: { users: [null, { id: "missing", username: "u", name: "User" }] }
+  })
+  const parsed = Model.parseTweetList(body)
+  assert.equal(parsed.valid, true)
+  assert.equal(parsed.tweets.length, 1)
+  assert.equal(parsed.tweets[0].createdMs, 0)
+  assert.equal(parsed.tweets[0].conversationId, "1")
+  assert.equal(parsed.tweets[0].authorUsername, "u")
+  assert.equal(parsed.resultCount, 1)
+  assert.equal(parsed.newestId, "")
+
+  const rejected = Model.parseTweetList(JSON.stringify({ data: [null, { id: "2" }, { text: "missing id" }] }))
+  assert.equal(rejected.valid, true)
+  assert.deepEqual(rejected.tweets, [])
+  assert.equal(Model.parseTweetList("null").valid, false)
+})
+
+test("similarity helpers define empty and one-sided input semantics", () => {
+  assert.equal(Model.charTrigramSimilarity("", ""), 1)
+  assert.equal(Model.charTrigramSimilarity("", "abc"), 0)
+  assert.equal(Model.tokenJaccardSimilarity("", ""), 1)
+  assert.equal(Model.tokenJaccardSimilarity("", "word"), 0)
+  assert.equal(Model.tokenJaccardSimilarity("same same", "same"), 1)
+})
+
+test("substance scoring covers every evidence increment and clamps at one", () => {
+  const text = "Because version 12 specifically fails at step 3, compared with the prior build? " + "detail ".repeat(30)
+  assert.equal(Model.substanceScore(text, { likes: 6, replies: 1 }), 1)
+  assert.equal(Model.substanceScore("plain reply", null), 0.2)
+})
+
+test("dedupe handles empty, singleton, explicit thresholds, and engagement tie-breaks", () => {
+  assert.deepEqual(Model.collapseDuplicates(null), [])
+  const one = [reply({ id: "1" })]
+  assert.equal(Model.collapseDuplicates(one), one)
+  assert.equal(one[0].isCanonical, true)
+  const pair = [
+    reply({ id: "1", text: "same crash report", metrics: {} }),
+    reply({ id: "2", text: "same crash report", metrics: { quotes: 2 } })
+  ]
+  Model.collapseDuplicates(pair, 0.9)
+  assert.equal(pair[1].isCanonical, true)
+  assert.equal(pair[1].dupCount, 1)
+})
+
+test("redaction identifies URL tokens and unprefixed long keys", () => {
+  const rawKey = "A".repeat(45)
+  const r = Model.redactPii(`https://x.test/?token=secret-value&next=1 ${rawKey}`)
+  assert.doesNotMatch(r.redactedText, /secret-value/)
+  assert.doesNotMatch(r.redactedText, new RegExp(rawKey))
+  assert.ok(r.piiFlags.includes("url_token"))
+  assert.ok(r.piiFlags.includes("api_key"))
+  assert.deepEqual(Model.redactPii("safe text").piiFlags, [])
+})
+
+test("digest helpers handle empty, unknown, old, and competing replies", () => {
+  assert.deepEqual(Model.bucketCounts(null), { praise: 0, gripe: 0, question: 0, feature_ask: 0, noise: 0 })
+  assert.equal(Model.bucketChips({ praise: 0, gripe: 0, question: 0, feature_ask: 0, noise: 0 }), "")
+  assert.deepEqual(Model.topQuotes(null), [])
+  const quotes = Model.topQuotes([
+    reply({ id: "a", bucket: "question", substance: 0.4, isCanonical: false }),
+    reply({ id: "b", bucket: "question", substance: 0.5 }),
+    reply({ id: "c", bucket: "question", substance: 0.9 }),
+    reply({ id: "d", bucket: "noise", substance: 1 })
+  ])
+  assert.equal(quotes.length, 1)
+  assert.equal(quotes[0].text, "How does this work?")
+  assert.equal(Model.velocityPerHour([reply({ createdMs: NOW_MS - 7 * 3600000 })], NOW_MS), 0)
+})
+
+test("needsReply rejects null, low-substance, noncanonical, and unsupported lanes", () => {
+  assert.equal(Model.needsReply(null, SELF), false)
+  assert.equal(Model.needsReply(reply({ bucket: "praise" }), SELF), false)
+  assert.equal(Model.needsReply(reply({ substance: 0.1 }), SELF), false)
+  assert.equal(Model.needsReply(reply({ isCanonical: false }), SELF), false)
+})
+
+test("spend helpers cover invalid caps, old months, negatives, and zero projection", () => {
+  assert.equal(Model.projectedMonthUsd(null, NOW_MS), 0)
+  assert.equal(Model.projectedMonthUsd({ month: "2025-01", dollars: 9 }, NOW_MS), 0)
+  assert.equal(Model.spendText(null, NOW_MS).startsWith("$0.00"), true)
+  assert.equal(Model.spendFraction({ month: "2026-08", dollars: -1 }, 8, NOW_MS), 0)
+  assert.equal(Model.spendFraction({ month: "2026-08", dollars: 1 }, 0, NOW_MS), 0)
+  assert.equal(Model.budgetStopped({ month: "2026-08", dollars: 9, posts: 9 }, 0, NOW_MS), false)
+  assert.equal(Model.spendNearCap({ month: "2026-08", dollars: 6.4 }, 8, NOW_MS), true)
+})
+
+test("summary parser supports typed parts and rejects oversized or malformed content", () => {
+  const typed = JSON.stringify({ choices: [{ message: { content: [
+    null, { type: "image" }, { text: 3 }, { type: "text", text: "First" }, { type: "text", text: "Second" }
+  ] } }] })
+  assert.equal(Model.parseSummary(typed), "First Second")
+  assert.equal(Model.parseSummary("x".repeat(Model.MAX_BODY_CHARS + 1)), "")
+  assert.equal(Model.parseSummary("not json"), "")
+  assert.equal(Model.parseSummary(JSON.stringify({ choices: [] })), "")
+})
+
+test("emptyState and sparse parseState retain every public field", () => {
+  assert.deepEqual(Model.emptyState(), {
+    valid: false, generatedAt: 0, configured: false, stopped: false,
+    account: { username: "", last4: "" },
+    ledger: { month: "", posts: 0, dollars: 0 },
+    capUsd: Model.DEFAULT_MONTHLY_CAP_USD, spendMeter: "Compact",
+    queue: [], posts: [], lastError: ""
+  })
+  assert.equal(Model.parseState("x".repeat(Model.MAX_BODY_CHARS + 1)).valid, false)
+  const parsed = Model.parseState(JSON.stringify({ queue: [null, { id: "1" }], posts: [null, {}] }))
+  assert.equal(parsed.valid, true)
+  assert.deepEqual(parsed.queue, [])
+  assert.deepEqual(parsed.posts, [])
+})
+
+test("store helpers accept empty input without changing the working set", () => {
+  const internal = Model.emptyInternal()
+  assert.equal(Model.ingestReplies(internal, null, SELF), internal)
+  assert.equal(Model.absorbOwnPosts(internal, null, NOW_MS), internal)
+  assert.deepEqual(Model.classifyIngest(null, SELF), [])
+  assert.deepEqual(Model.allReplies(internal), [])
+})

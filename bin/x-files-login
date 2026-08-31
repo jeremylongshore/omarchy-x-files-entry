@@ -12,9 +12,10 @@
 # `--header @-` (stdin) as well, so it is never visible to ps. Get an app-only
 # bearer token and pay-per-use credits at https://console.x.com
 set -euo pipefail
+set +x   # never trace: a trace prints the token
 
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/omarchy/x-files"
-CREDS="$STATE_DIR/credentials.json"
+SELF_DIR="$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)"
+SECURE_STATE="$SELF_DIR/x-files-secure-state"
 
 die() { printf 'x-files-login: %s\n' "$1" >&2; exit 1; }
 
@@ -22,7 +23,7 @@ USERNAME=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --forget)
-      rm -f "$CREDS"
+      "$SECURE_STATE" --forget
       printf 'x-files-login: credentials removed\n' >&2
       exit 0
       ;;
@@ -44,7 +45,7 @@ fi
 IFS= read -r TOKEN || true
 TOKEN="${TOKEN//[$'\r\n']/}"
 [[ -n $TOKEN ]] || die 'no token on stdin'
-[[ $TOKEN =~ ^[A-Za-z0-9%_-]{20,}$ ]] || die 'that does not look like a bearer token'
+[[ $TOKEN =~ ^[A-Za-z0-9%_-]{20,4096}$ ]] || die 'that does not look like a bearer token'
 
 # One lookup proves the token works and resolves the numeric user id. The
 # Authorization header rides stdin, so the token is invisible to ps.
@@ -57,12 +58,12 @@ USER_ID=$(printf '%s' "$RESPONSE" | jq -r '.data.id // empty')
 RESOLVED=$(printf '%s' "$RESPONSE" | jq -r '.data.username // empty')
 [[ -n $USER_ID ]] || die 'could not parse the user lookup response'
 
-mkdir -p -m 700 "$STATE_DIR"
-TMP=$(mktemp "$CREDS.XXXXXX")
-chmod 600 "$TMP"
-jq -n --arg t "$TOKEN" --arg i "$USER_ID" --arg u "${RESOLVED:-$USERNAME}" \
-  '{bearerToken:$t, userId:$i, username:$u}' > "$TMP"
-mv "$TMP" "$CREDS"
+# Keep the credential off argv and out of pathname-based shell writes. The
+# purpose-built Perl helper pins every parent descriptor, creates its temporary
+# entry with O_EXCL|O_NOFOLLOW, retains that descriptor through fsync and
+# replacement, and verifies object identity before and after publication.
+printf '%s\n%s\n%s\n' "$TOKEN" "$USER_ID" "${RESOLVED:-$USERNAME}" | \
+  "$SECURE_STATE" --write
 
 printf 'x-files-login: connected @%s (token ending %s). The widget picks it up within a minute.\n' \
   "${RESOLVED:-$USERNAME}" "${TOKEN: -4}" >&2

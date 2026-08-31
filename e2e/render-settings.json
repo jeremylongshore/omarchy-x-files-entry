@@ -1,0 +1,9 @@
+{
+  "notifications": "Off",
+  "monthlyCapUsd": 8,
+  "costPerPost": "0.005",
+  "spendMeter": "Full",
+  "aiBaseUrl": "http://127.0.0.1:1234/v1",
+  "aiModel": "x-files-rig-fixture",
+  "aiApiKey": "fixture-ai-key-never-sent-off-rig"
+}

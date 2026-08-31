@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Deterministic curl replacement used only inside rig-render's isolated PATH.
+# It exercises the shipped Service.qml request sequence without contacting X.
+set -euo pipefail
+
+authorization=""
+IFS= read -r authorization || true
+[[ "$authorization" == Authorization:\ Bearer\ * ]] || {
+  printf '%s\n%s' '{"error":"missing bearer header on stdin"}' 401
+  exit 0
+}
+
+url=""
+for argument in "$@"; do
+  url="$argument"
+done
+log_file="${XDG_RUNTIME_DIR:-/tmp}/x-files-fixture.log"
+
+iso_ago() {
+  local seconds="$1"
+  date -u -d "@$(( $(date -u +%s) - seconds ))" +%Y-%m-%dT%H:%M:%SZ
+}
+
+case "$url" in
+  https://api.x.com/2/users/44196397/tweets\?*)
+    printf '%s\n' own >> "$log_file"
+    now="$(iso_ago 1800)"
+    earlier="$(iso_ago 14400)"
+    jq -nc --arg now "$now" --arg earlier "$earlier" '{
+      data:[
+        {id:"1900000000000000001",text:"Shipping X Files: one queue for the replies that need a founder, plus a digest of everything else.",created_at:$now,conversation_id:"1900000000000000001",author_id:"44196397",public_metrics:{reply_count:7,like_count:84,retweet_count:11,quote_count:4}},
+        {id:"1900000000000000002",text:"Quiet build note, no replies expected.",created_at:$earlier,conversation_id:"1900000000000000002",author_id:"44196397",public_metrics:{reply_count:0,like_count:7,retweet_count:0,quote_count:0}}
+      ],includes:{users:[{id:"44196397",username:"testfounder",name:"Test Founder"}]},meta:{result_count:2,newest_id:"1900000000000000002"}
+    }'
+    ;;
+  https://api.x.com/2/users/44196397/mentions\?*)
+    printf '%s\n' mentions >> "$log_file"
+    now="$(iso_ago 1200)"
+    jq -nc --arg now "$now" '{
+      data:[{id:"1900000000000000201",text:"Love this approach. The queue makes replies feel manageable.",created_at:$now,conversation_id:"1900000000000000201",author_id:"2001",in_reply_to_user_id:"44196397",public_metrics:{reply_count:0,like_count:5,retweet_count:0,quote_count:0}}],
+      includes:{users:[{id:"2001",username:"signal_boost",name:"Signal Boost"}]},meta:{result_count:1,newest_id:"1900000000000000201"}
+    }'
+    ;;
+  https://api.x.com/2/tweets/search/recent\?*)
+    printf '%s\n' conversation >> "$log_file"
+    t1="$(iso_ago 900)"; t2="$(iso_ago 840)"; t3="$(iso_ago 720)"; t4="$(iso_ago 600)"
+    t5="$(iso_ago 480)"; t6="$(iso_ago 360)"; t7="$(iso_ago 240)"
+    jq -nc --arg t1 "$t1" --arg t2 "$t2" --arg t3 "$t3" --arg t4 "$t4" --arg t5 "$t5" --arg t6 "$t6" --arg t7 "$t7" '{
+      data:[
+        {id:"1900000000000000101",text:"The panel crashes on open every time on Wayland; build 42 reproduces it.",created_at:$t1,conversation_id:"1900000000000000001",author_id:"1001",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:6,retweet_count:0,quote_count:0}},
+        {id:"1900000000000000102",text:"same here",created_at:$t2,conversation_id:"1900000000000000001",author_id:"1002",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:0,retweet_count:0,quote_count:0}},
+        {id:"1900000000000000103",text:"Could you add per-provider filters? That would help separate agent replies.",created_at:$t3,conversation_id:"1900000000000000001",author_id:"1003",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:1,like_count:9,retweet_count:0,quote_count:0}},
+        {id:"1900000000000000104",text:"How does the spend meter know the exact per-post price?",created_at:$t4,conversation_id:"1900000000000000001",author_id:"1004",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:2,retweet_count:0,quote_count:0}},
+        {id:"1900000000000000105",text:"This is excellent. Exactly the founder inbox I wanted.",created_at:$t5,conversation_id:"1900000000000000001",author_id:"1005",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:14,retweet_count:1,quote_count:0}},
+        {id:"1900000000000000106",text:"follow me for crypto signals and DM for the airdrop",created_at:$t6,conversation_id:"1900000000000000001",author_id:"1006",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:0,retweet_count:0,quote_count:0}},
+        {id:"1900000000000000107",text:"Panel crashes on Wayland when I open it; build 42 fails every time.",created_at:$t7,conversation_id:"1900000000000000001",author_id:"1007",in_reply_to_user_id:"44196397",referenced_tweets:[{type:"replied_to",id:"1900000000000000001"}],public_metrics:{reply_count:0,like_count:1,retweet_count:0,quote_count:0}}
+      ],includes:{users:[
+        {id:"1001",username:"wayland_user",name:"Wayland User"},{id:"1002",username:"plus_one",name:"Plus One"},{id:"1003",username:"feature_fan",name:"Feature Fan"},{id:"1004",username:"curious_dev",name:"Curious Dev"},{id:"1005",username:"happy_founder",name:"Happy Founder"},{id:"1006",username:"spam_bot",name:"Spam Bot"},{id:"1007",username:"second_reporter",name:"Second Reporter"}
+      ]},meta:{result_count:7,newest_id:"1900000000000000107"}
+    }'
+    ;;
+  http://127.0.0.1:1234/v1/chat/completions)
+    printf '%s\n' summary >> "$log_file"
+    jq -nc '{choices:[{message:{content:"Two independent replies report a repeatable Wayland crash on panel open. One founder asks for per-provider filters, while another wants the spend calculation explained."},finish_reason:"stop"}]}'
+    ;;
+  *)
+    printf '%s\n' unexpected >> "$log_file"
+    jq -nc --arg url "$url" '{error:"unexpected fixture URL",url:$url}'
+    printf '\n404'
+    exit 0
+    ;;
+esac
+printf '\n200'

@@ -1,0 +1,151 @@
+#!/usr/bin/perl
+# Descriptor-bound credential lifecycle for X Files. The shell login owns X
+# lookup and UX; this secure-state helper alone owns publication and removal.
+use strict;
+use warnings;
+
+use Fcntl qw(:DEFAULT :flock :mode);
+use File::Spec;
+use IO::Handle;
+use JSON::PP qw(encode_json);
+
+umask 0077;
+my $FINAL = 'credentials.json';
+my $LOCK = '.credentials.lock';
+my $MAX_INPUT = 4600;
+
+sub open_state_chain {
+    my $home = $ENV{HOME} // '';
+    my $base = length($ENV{XDG_STATE_HOME} // '')
+        ? $ENV{XDG_STATE_HOME}
+        : File::Spec->catdir($home, '.local', 'state');
+    die "state root must be absolute\n" unless File::Spec->file_name_is_absolute($base);
+    my $full = File::Spec->catdir($base, 'omarchy', 'x-files');
+    my @parts = grep { length($_) } File::Spec->splitdir($full);
+    die "unsafe state path\n" if grep { $_ eq '.' || $_ eq '..' } @parts;
+
+    my $current;
+    sysopen($current, '/', O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+        or die "cannot pin filesystem root\n";
+    my @chain = ($current);
+    for my $part (@parts) {
+        chdir($current) or die "cannot traverse state path\n";
+        my $next;
+        unless (sysopen($next, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)) {
+            mkdir($part, 0700);
+            sysopen($next, $part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                or die "unsafe state path component\n";
+        }
+        my @st = stat($next);
+        die "unsafe state path component\n" unless @st && S_ISDIR($st[2]);
+        push @chain, $next;
+        $current = $next;
+    }
+    my @final_dir = stat($current);
+    die "unsafe state directory owner\n"
+        unless @final_dir && S_ISDIR($final_dir[2]) && $final_dir[4] == $<;
+    chmod(0700, $current) or die "cannot privatize state directory\n";
+    chdir($current) or die "cannot retain state directory\n";
+    return (\@chain, $current);
+}
+
+sub lock_state {
+    my $fh;
+    sysopen($fh, $LOCK, O_RDWR | O_CREAT | O_NOFOLLOW, 0600)
+        or die "cannot open credential lock\n";
+    my @st = stat($fh);
+    die "unsafe credential lock\n"
+        unless @st && S_ISREG($st[2]) && $st[4] == $<;
+    chmod(0600, $fh) or die "cannot privatize credential lock\n";
+    flock($fh, LOCK_EX) or die "cannot lock credentials\n";
+    return $fh;
+}
+
+sub same_object {
+    my ($left, $right) = @_;
+    return @$left && @$right && $left->[0] == $right->[0]
+        && $left->[1] == $right->[1] && S_ISREG($left->[2]) && S_ISREG($right->[2]);
+}
+
+sub read_input {
+    my $raw = '';
+    while (length($raw) <= $MAX_INPUT) {
+        my $n = sysread(STDIN, my $chunk, 512);
+        last unless defined($n) && $n > 0;
+        $raw .= $chunk;
+    }
+    die "credential input exceeded bound\n" if length($raw) > $MAX_INPUT;
+    my ($token, $user_id, $username, @rest) = split /\n/, $raw;
+    die "invalid credential input\n"
+        if @rest || !defined($token) || !defined($user_id) || !defined($username);
+    die "invalid token\n" unless $token =~ /\A[A-Za-z0-9%_-]{20,4096}\z/;
+    die "invalid user id\n" unless $user_id =~ /\A[0-9]{1,30}\z/;
+    die "invalid username\n" unless $username =~ /\A[A-Za-z0-9_]{1,15}\z/;
+    return encode_json({
+        bearerToken => $token, userId => $user_id, username => $username
+    }) . "\n";
+}
+
+sub open_temp {
+    for (1 .. 64) {
+        my $name = sprintf('.credentials.%d.%08x%08x', $$,
+            int(rand(0xffffffff)), int(rand(0xffffffff)));
+        my $fh;
+        if (sysopen($fh, $name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600)) {
+            chmod(0600, $fh) or die "cannot privatize credential temp\n";
+            return ($name, $fh);
+        }
+    }
+    die "cannot create credential temp\n";
+}
+
+sub publish {
+    my ($payload, $dir_fh) = @_;
+    my ($temp, $fh) = open_temp();
+    my @opened = stat($fh);
+    my $published = 0;
+    my $ok = eval {
+        my $offset = 0;
+        while ($offset < length($payload)) {
+            my $n = syswrite($fh, substr($payload, $offset));
+            die "credential write failed\n" unless defined($n) && $n > 0;
+            $offset += $n;
+        }
+        $fh->sync or die "credential fsync failed\n";
+        my @named = lstat($temp);
+        die "credential temp identity changed\n" unless same_object(\@opened, \@named);
+        rename($temp, $FINAL) or die "credential replace failed\n";
+        $published = 1;
+        my @final = lstat($FINAL);
+        die "credential publication identity changed\n" unless same_object(\@opened, \@final);
+        $dir_fh->sync or die "credential directory fsync failed\n";
+        close($fh) or die "credential close failed\n";
+        1;
+    };
+    return if $ok;
+    my $error = $@ || "credential publication failed\n";
+    close($fh);
+    unlink($temp) unless $published;
+    die $error;
+}
+
+sub forget {
+    my ($dir_fh) = @_;
+    my @before = lstat($FINAL);
+    return unless @before && S_ISREG($before[2]) && $before[4] == $<;
+    my $fh;
+    return unless sysopen($fh, $FINAL, O_RDONLY | O_NONBLOCK | O_NOFOLLOW);
+    my @opened = stat($fh);
+    my @named = lstat($FINAL);
+    unlink($FINAL) if same_object(\@opened, \@named);
+    close($fh);
+    $dir_fh->sync or die "credential directory fsync failed\n";
+}
+
+my $op = $ARGV[0] // '';
+die "usage: x-files-secure-state --write|--forget\n"
+    unless @ARGV == 1 && ($op eq '--write' || $op eq '--forget');
+my ($chain, $dir_fh) = open_state_chain();
+my $lock_fh = lock_state();
+if ($op eq '--write') { publish(read_input(), $dir_fh) }
+else { forget($dir_fh) }
