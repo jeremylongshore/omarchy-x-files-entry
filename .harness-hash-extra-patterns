@@ -5,6 +5,7 @@
 .githooks/pre-push
 bin/*
 package.json
+scripts/ci-change-scope.sh
 scripts/run-plugin-gates.sh
 scripts/sync-gate-lane.sh
 scripts/check-lane-freshness.sh
