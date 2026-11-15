@@ -2,6 +2,9 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Commons
+// Qt 6.12 adds its own Color type, so Omarchy's palette singleton must be
+// qualified (docs/omarchy-shell.md, Theme tokens).
+import qs.Commons as Commons
 import qs.Ui
 import "Model.js" as Model
 
@@ -254,7 +257,7 @@ Panel {
               Text {
                 text: "X FILES"
                 textFormat: Text.PlainText
-                color: root.bar ? root.bar.foreground : Color.foreground
+                color: root.bar ? root.bar.foreground : Commons.Color.foreground
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.title
                 font.bold: true
@@ -275,7 +278,7 @@ Panel {
                 width: parent.width
                 maximumLineCount: 1
                 elide: Text.ElideRight
-                color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Color.muted
+                color: root.bar ? Qt.darker(root.bar.foreground, 1.4) : Commons.Color.muted
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.caption
                 font.letterSpacing: 1
@@ -300,7 +303,7 @@ Panel {
                 width: parent.width
                 maximumLineCount: 1
                 elide: Text.ElideRight
-                color: root.bar ? root.bar.foreground : Color.foreground
+                color: root.bar ? root.bar.foreground : Commons.Color.foreground
                 font.family: root.bar ? root.bar.fontFamily : Style.font.family
                 font.pixelSize: Style.font.bodySmall
               }
@@ -317,7 +320,7 @@ Panel {
                   width: parent.width
                   height: Style.space(5)
                   radius: height / 2
-                  color: root.bar ? Qt.darker(root.bar.foreground, 2.2) : Color.muted
+                  color: root.bar ? Qt.darker(root.bar.foreground, 2.2) : Commons.Color.muted
                   opacity: 0.35
 
                   Rectangle {
@@ -327,8 +330,8 @@ Panel {
                     height: parent.height
                     radius: height / 2
                     color: heroCol.spendNear
-                      ? (root.bar ? root.bar.urgent : Color.urgent)
-                      : (root.bar ? root.bar.foreground : Color.foreground)
+                      ? (root.bar ? root.bar.urgent : Commons.Color.urgent)
+                      : (root.bar ? root.bar.foreground : Commons.Color.foreground)
                   }
                 }
               }
@@ -342,7 +345,7 @@ Panel {
             anchors.horizontalCenter: parent.horizontalCenter
             height: capText.implicitHeight + Style.space(12)
             radius: Style.cornerRadius
-            color: root.bar ? root.bar.urgent : Color.urgent
+            color: root.bar ? root.bar.urgent : Commons.Color.urgent
 
             Text {
               id: capText
@@ -352,7 +355,7 @@ Panel {
               textFormat: Text.PlainText
               wrapMode: Text.WordWrap
               horizontalAlignment: Text.AlignHCenter
-              color: root.bar ? root.bar.background : Color.background
+              color: root.bar ? root.bar.background : Commons.Color.background
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.bodySmall
               font.bold: true
@@ -365,12 +368,12 @@ Panel {
             width: parent.width
             spacing: Style.space(2)
 
-            PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
+            PanelSeparator { foreground: root.bar ? root.bar.foreground : Commons.Color.foreground }
 
             PanelSectionHeader {
               text: "NEEDS YOUR REPLY" + (root.openQueue.length > 0 ? " · " + root.openQueue.length : "")
               leftPadding: Style.space(16)
-              foreground: root.bar ? root.bar.foreground : Color.foreground
+              foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
             }
 
@@ -382,7 +385,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width - Style.space(32)
               wrapMode: Text.WordWrap
-              color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
+              color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Commons.Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.body
             }
@@ -404,7 +407,7 @@ Panel {
                   anchors.leftMargin: Style.space(8)
                   anchors.rightMargin: Style.space(8)
                   radius: Style.cornerRadius
-                  color: root.bar ? root.bar.foreground : Color.foreground
+                  color: root.bar ? root.bar.foreground : Commons.Color.foreground
                   opacity: 0.12
                 }
 
@@ -447,7 +450,7 @@ Panel {
                       textFormat: Text.PlainText
                       width: Math.min(implicitWidth, qCol.width * 0.4)
                       elide: Text.ElideRight
-                      color: root.bar ? root.bar.foreground : Color.foreground
+                      color: root.bar ? root.bar.foreground : Commons.Color.foreground
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.bodySmall
                       font.bold: true
@@ -463,7 +466,7 @@ Panel {
                       // queue without reading every row. Noise returns -1 and
                       // stays unsaturated on purpose: it is the lane you skip.
                       color: Model.laneHue(qItem.modelData.bucket) < 0
-                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.6) : Color.muted)
+                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.6) : Commons.Color.muted)
                         : Qt.hsla(Model.laneHue(qItem.modelData.bucket), 0.55, 0.62, 1.0)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
@@ -473,7 +476,7 @@ Panel {
                       textFormat: Text.PlainText
                       width: Math.min(implicitWidth, qCol.width * 0.3)
                       elide: Text.ElideRight
-                      color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
+                      color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Commons.Color.muted
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.caption
                     }
@@ -486,7 +489,7 @@ Panel {
                     wrapMode: Text.WordWrap
                     maximumLineCount: 2
                     elide: Text.ElideRight
-                    color: root.bar ? root.bar.foreground : Color.foreground
+                    color: root.bar ? root.bar.foreground : Commons.Color.foreground
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.body
                   }
@@ -501,12 +504,12 @@ Panel {
             width: parent.width
             spacing: Style.space(2)
 
-            PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
+            PanelSeparator { foreground: root.bar ? root.bar.foreground : Commons.Color.foreground }
 
             PanelSectionHeader {
               text: "YOUR RECENT POSTS"
               leftPadding: Style.space(16)
-              foreground: root.bar ? root.bar.foreground : Color.foreground
+              foreground: root.bar ? root.bar.foreground : Commons.Color.foreground
               fontFamily: root.bar ? root.bar.fontFamily : Style.font.family
             }
 
@@ -534,7 +537,7 @@ Panel {
                     wrapMode: Text.WordWrap
                     maximumLineCount: 1
                     elide: Text.ElideRight
-                    color: root.bar ? root.bar.foreground : Color.foreground
+                    color: root.bar ? root.bar.foreground : Commons.Color.foreground
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.body
                     font.bold: true
@@ -548,7 +551,7 @@ Panel {
                     width: parent.width
                     maximumLineCount: 1
                     elide: Text.ElideRight
-                    color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Color.muted
+                    color: root.bar ? Qt.darker(root.bar.foreground, 1.35) : Commons.Color.muted
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.caption
                   }
@@ -561,7 +564,7 @@ Panel {
                     text: modelData.summary
                     textFormat: Text.PlainText
                     wrapMode: Text.WordWrap
-                    color: root.bar ? Qt.darker(root.bar.foreground, 1.15) : Color.muted
+                    color: root.bar ? Qt.darker(root.bar.foreground, 1.15) : Commons.Color.muted
                     font.family: root.bar ? root.bar.fontFamily : Style.font.family
                     font.pixelSize: Style.font.bodySmall
                   }
@@ -580,7 +583,7 @@ Panel {
                       textFormat: Text.PlainText
                       wrapMode: Text.WordWrap
                       color: Model.laneHue(modelData.bucket) < 0
-                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.25) : Color.muted)
+                        ? (root.bar ? Qt.darker(root.bar.foreground, 1.25) : Commons.Color.muted)
                         : Qt.hsla(Model.laneHue(modelData.bucket), 0.42, 0.66, 1.0)
                       font.family: root.bar ? root.bar.fontFamily : Style.font.family
                       font.pixelSize: Style.font.bodySmall
@@ -597,7 +600,7 @@ Panel {
             width: parent.width
             spacing: Style.space(2)
 
-            PanelSeparator { foreground: root.bar ? root.bar.foreground : Color.foreground }
+            PanelSeparator { foreground: root.bar ? root.bar.foreground : Commons.Color.foreground }
 
             Text {
               anchors.left: parent.left
@@ -606,7 +609,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width - Style.space(32)
               wrapMode: Text.WordWrap
-              color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
+              color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Commons.Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -618,7 +621,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width - Style.space(32)
               wrapMode: Text.WordWrap
-              color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Color.muted
+              color: root.bar ? Qt.darker(root.bar.foreground, 1.45) : Commons.Color.muted
               font.family: root.bar ? root.bar.fontFamily : Style.font.family
               font.pixelSize: Style.font.caption
             }
